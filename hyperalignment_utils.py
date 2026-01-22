@@ -17,7 +17,7 @@ def get_hyperalignment_func(alignfunc,alpha=None):
         ValueError("Unsupported alignment method provided! Choose from 'procr','ridge'")
     return func
 
-def load_saved_transform(sid,transform_dir,roi,target_flag,align_method,whichrois):
+def load_saved_transform(sid,transform_dir,roi,target_flag,align_method,whichrois): # -> not generic enough, consider removing
     if whichrois == 'cortical':
         transform_fn = os.path.join(transform_dir,
             f"{sid}_targets_{target_flag}_{roi}h_{align_method}.npz")
@@ -84,6 +84,12 @@ def calculate_connectivity(ts_target,ts_seed,zscore_axis=0,z=True, metric='corre
     return conn
 
 def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,saved_beta_path=None,zscore_axis=0,separate_zscore=True):
+    if not isinstance(targets,list):
+        targets = [targets]
+    if not isinstance(sid,str):
+        ValueError("Expect single sid not an array or list")
+    if type(run) is int:
+        run = [run]
     dm_allruns = []
     for curr_run in run:
         seed_ts = get_dm(dset,sid,roi,task,curr_run, seedspace,atlas=seeds,saved_beta_path=saved_beta_path,array_output=True)
@@ -106,64 +112,80 @@ def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,saved_beta
                     dm_allruns.append(dm)
     return np.stack(dm_allruns,axis=0)
 
-# def calc_reliability_single_subj(dset,sid,targets,seeds,task,run,outdir=None,saved_beta_path=None,zscore_ax=0):
-#     seedrois,seedspace = get_rois_and_space(seeds,dset.surface_space,dset.volume_space)
-#     if seeds.startswith('Tian'):
-#         seedrois = ['Tian_Subcortex']
-#     seed_ts_allruns = []
-#     for curr_run in run:
-#         seed_ts = get_dm(dset, sid, seedrois, task, curr_run, seedspace,
-#                         atlas=seeds,saved_beta_path=saved_beta_path,array_output=True)
-#         seed_ts_allruns.append(seed_ts[0])
-#     for target in targets:
-#         targetrois,targetspace = get_rois_and_space(target,dset.surface_space,dset.volume_space)
-#         conn_allruns = []
-#         for irun,curr_run in enumerate(run):
-#             target_ts = get_dm(dset, sid, targetrois, task, curr_run, targetspace,
-#                     atlas=target,saved_beta_path=saved_beta_path,array_output=False)
-#             if target.startswith('onavg'):
-#                 MAPPINGS = {roi:nb.mapping(roi, dset.surface_space, target, mask=True) for roi in targetrois}
-#                 target_ts = get_target_ts(target_ts,'mapping',target_item=MAPPINGS)
-#             else:
-#                 target_ts = get_target_ts(target_ts,'searchlight_mean')
-#             conn = calculate_connectivity(target_ts,seed_ts_allruns[irun],zscore_axis = zscore_ax)
-#             conn_allruns.append(conn)
-#         conn_allruns = np.stack(conn_allruns,axis=0)
-#         calpha = cronbach_alpha(conn_allruns,rep_axis=0,var_axis=1)
-#         if outdir:
-#             save_cfn = f"{outdir}/{sid}_CronbachAlpha_run{''.join(map(str,run))}_reliability_seeds-{seeds}_targets-{target}.npy"
-#             np.save(save_cfn,calpha)
-#         return calpha
-
-def reliability_weighting_hyperalignment(X, Y, func, voxel_reliability_scores=None,threshold=None):
+def reliability_weighting_hyperalignment(X, Y, func, voxel_reliability_scores=None, threshold=None):
     """
-    Hyperalignment with reliability weighting
-    X, Y: (16, 285) - source and target data
-    reliability_weights: (285,) - per-voxel reliability
-    alpha: regularization strength
-    """
+    Reliability-weighted hyperalignment.
 
+    X, Y: (N, P)  # N timepoints/samples, P voxels/features
+    func: callable (X, Y) -> transform
+          - Procrustes: returns orthogonal Q (P,P) such that X @ Q ~ Y
+          - Ridge: returns linear T_w (P,P) such that X_w @ T_w ~ Y_w
+
+    voxel_reliability_scores: (P,) in [0,1] ideally (or will be clipped)
+    threshold: if not None, binarize weights: w=1 if score>=threshold else 0
+
+    Returns:
+      - If func is procrustes-like: Q (P,P), orthogonal (up to numeric error)
+      - If func is ridge-like:     T (P,P) mapped back to original space
+    """
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if X.shape != Y.shape:
+        raise ValueError(f"X and Y must have same shape, got {X.shape} vs {Y.shape}")
+    if X.ndim != 2:
+        raise ValueError(f"Expected 2D arrays (N,P); got X.ndim={X.ndim}")
+
+    P = X.shape[1]
+
+    # No weighting
     if voxel_reliability_scores is None:
-       xfm = func(X, Y)
+        return func(X, Y)
+
+    scores = np.asarray(voxel_reliability_scores).reshape(-1)
+    if scores.shape[0] != P:
+        raise ValueError(f"voxel_reliability_scores must have length P={P}, got {scores.shape[0]}")
+
+    if threshold is None:
+        w = np.clip(scores.astype(float), 0.0, 1.0)
     else:
-        if threshold is None:
-            weights = np.clip(voxel_reliability_scores, 0.0, 1.0)
-        else:
-            weights = np.ones_like(voxel_reliability_scores)
-            weights[voxel_reliability_scores < threshold] = 0.0
+        w = np.ones(P, dtype=float)
+        w[scores < threshold] = 0.0
 
-        # Apply reliability weighting to features (voxels)
-        W_reliability = np.diag(np.sqrt(weights))  # (285, 285)
+    # Construct W = diag(sqrt(w))
+    wsqrt = np.sqrt(w)
+    # Efficient column scaling instead of making a dense diag
+    X_scaled = X * wsqrt[None, :]
+    Y_scaled = Y * wsqrt[None, :]
 
-        # Transform X: X_scaled = X @ W_reliability
-        X_scaled = X @ W_reliability  # (16, 285)
+    T_scaled = func(X_scaled, Y_scaled)
 
-        # Standard ridge on scaled data
-        R_scaled = func(X_scaled, Y)  # (285, 285)
+    # Decide whether we should map back (ridge) or not (procrustes).
+    # Procrustes returns an orthogonal matrix in voxel space; keep it orthogonal.
+    # Ridge returns an unconstrained linear map in the scaled space; map back.
+    name = getattr(func, "__name__", None)
+    is_partial = hasattr(func, "keywords")  # functools.partial
+    if is_partial:
+        base = getattr(func, "func", None)
+        base_name = getattr(base, "__name__", "")
+    else:
+        base_name = name or ""
 
-        # Transform back to original voxel space
-        xfm = W_reliability @ R_scaled  # (285, 285)
-    return xfm
+    procrustes_like = "procr" in base_name.lower()
+
+    if procrustes_like:
+        # This is already the orthogonal Q that best aligns X_scaled -> Y_scaled.
+        # Applying it to unweighted X is what you want, and it preserves orthogonality.
+        return T_scaled
+
+    # Ridge-like: map back to original space: T = W * T_scaled * W^{-1}
+    # Use pseudo-inverse on W if any zeros
+    inv_wsqrt = np.zeros_like(wsqrt)
+    nz = wsqrt > 0
+    inv_wsqrt[nz] = 1.0 / wsqrt[nz]
+
+    # Left-multiply scales rows, right-multiply scales columns
+    T = (wsqrt[:, None] * T_scaled) * inv_wsqrt[None, :]
+    return T
 
 def evaluate_transformation(X_val, Y_val, xfm):
     """
@@ -186,6 +208,7 @@ def loo_cv(X, Y, func,voxel_reliability_scores=None):
     Leave one run out cross-validation
     X : array (nruns, nT, nV)
     Y : array to align to (nT,nV)
+    func: the function, ridge or procrustes used to align the data
     reliability: reliability [0-1] to be used for weighting
     """
     nruns = X.shape[0]
@@ -197,9 +220,6 @@ def loo_cv(X, Y, func,voxel_reliability_scores=None):
         idx = np.arange(nruns) != i
         X_train = np.mean(X[idx], axis=0)
         R = reliability_weighting_hyperalignment(X_train, Y, func, voxel_reliability_scores=voxel_reliability_scores,threshold=None)
-        # R, reliability_weights = reliability_weighting_ridge(
-        #     X_train, Y, reliability, alpha=ridge_alpha
-        # )
 
         mt = evaluate_transformation(X_train, Y, R)
         mv = evaluate_transformation(X_val, Y, R)

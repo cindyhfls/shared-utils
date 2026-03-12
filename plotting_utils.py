@@ -19,10 +19,10 @@ def map_subcortical_roi_to_img(data, subcortical_atlas, rois, bg_img = 'T1_MNI20
       raise ValueError('The lookup table is for MNINLin2009cAsym so MNI152NLin6Asym is not supported')
    elif bg_img is not None:
       bg_img = img
-      
+
    templatedata = img.get_fdata()
    stat_map = np.zeros_like(templatedata, dtype=np.float64)
-   
+
    if isinstance(data,dict):
       l = []
       for roi in rois:
@@ -31,10 +31,15 @@ def map_subcortical_roi_to_img(data, subcortical_atlas, rois, bg_img = 'T1_MNI20
    elif not isinstance(rois,list):
       rois = [rois]
       data = [data]
-   
-   for roi,d in zip(rois,data):
-      stat_map[lut[lut.label==roi].i,lut[lut.label==roi].j,lut[lut.label==roi].k] = d
-   
+
+   if len(data)==1 and len(rois)!=1:
+      assert len(data[0])==len(lut),"if single data vector provided, it must match the full table length, i.e. all voxels in this specified atlas"
+      stat_map = data
+   else:
+      assert len(data)==len(rois),"please provide data and rois in lists of the same size"
+      for roi,d in zip(rois,data):
+         stat_map[lut[lut.label==roi].i,lut[lut.label==roi].j,lut[lut.label==roi].k] = d
+
    stat_map_img = image.new_img_like(img, stat_map)
    if interactive:
       view = plotting.view_img(stat_map_img,bg_img=bg_img,**kwargs)

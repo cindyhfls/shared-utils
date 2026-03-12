@@ -16,4 +16,3 @@ gauss = gaussian_filter(soft.astype('float32'), 1)
 header = im.header.copy()
 header.set_data_dtype('float32')
 nb.Nifti1Image(gauss.astype('float32'), im.affine, header).to_filename('tpl-MNI152NLin2009cAsym_res-01_desc-brain_probseg.nii.gz')
-

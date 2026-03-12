@@ -8,7 +8,7 @@ def main():
                             formatter_class=RawTextHelpFormatter)
     parser.add_argument('input_file', type=Path, action='store', help='input file')
     args = parser.parse_args()
-    
+
     data = pd.read_csv(args.input_file, delimiter='\s+', index_col=0, usecols=[0, 1, 2, 3, 4], header=None)
     out_desc = ''.join(str(args.input_file).split('_')[1:3])
     data.index.name = 'index'
@@ -19,4 +19,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

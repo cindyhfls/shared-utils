@@ -7,6 +7,23 @@ from .data_io_utils import get_dm,get_rois_and_space
 from hyperalignment.ridge import ridge
 from hyperalignment.procrustes import procrustes
 
+def downsample_template(tpl_fn,roi,template_input_space='onavg-ico64',data_space='onavg-ico32'):
+    '''
+    Assumed the input to be the gradient descent templates by Feilong (no mask, ico-8 by ico-64 shape)
+    Downsample to ico8 by ico32 (masked)
+    '''
+    # tpl_dir = 'template/sparta-gd_nll8.0_50000' # symlink to Feilong's folder
+    mask_lr_ico8 = nb.mask('lr',space='onavg-ico8')
+    mappings = {'l':nb.mapping('l',template_input_space,data_space,target_mask=True),
+        'r':nb.mapping('r',template_input_space,data_space,target_mask=True)}
+    if roi == 'l':
+        tpl_l = np.load(tpl_fn) [mask_lr_ico8]@mappings['l']
+        return tpl_l
+    elif roi == 'r':
+        tpl_r = np.load(tpl_fn) [mask_lr_ico8]@mappings['r']
+        return tpl_r
+
+
 def get_hyperalignment_func(alignfunc,alpha=None):
     # which transformation method?
     if alignfunc == "procr" or alignfunc == "procrustes":
@@ -66,10 +83,10 @@ def get_target_ts(dm, target_name,target_item=None):
     else:
         return all_target_ts
 
-def calc_target_ts_single_subj(dset,sid,target,task,run,saved_beta_path=None):
+def calc_target_ts_single_subj(dset,sid,target,task,run,**kwargs):
     targetrois,targetspace = get_rois_and_space(target,dset.surface_space,dset.volume_space)
     target_ts = get_dm(dset, sid, targetrois, task, run, targetspace,
-            atlas=target,saved_beta_path=saved_beta_path,array_output=False)
+            atlas=target,array_output=False,**kwargs)
     if target.startswith('onavg'):
         MAPPINGS = {roi:nb.mapping(roi, dset.surface_space, target, mask=True) for roi in targetrois}
         target_ts = get_target_ts(target_ts,'mapping',target_item=MAPPINGS)
@@ -83,7 +100,7 @@ def calculate_connectivity(ts_target,ts_seed,zscore_axis=0,z=True, metric='corre
         conn = np.nan_to_num(zscore(conn, axis=zscore_axis, nan_policy='omit'))
     return conn
 
-def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,saved_beta_path=None,zscore_axis=0,separate_zscore=True):
+def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,separate_zscore=True,zscore_axis=0,**kwargs):
     if not isinstance(targets,list):
         targets = [targets]
     if not isinstance(sid,str):
@@ -92,7 +109,7 @@ def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,saved_beta
         run = [run]
     dm_allruns = []
     for curr_run in run:
-        seed_ts = get_dm(dset,sid,roi,task,curr_run, seedspace,atlas=seeds,saved_beta_path=saved_beta_path,array_output=True)
+        seed_ts = get_dm(dset,sid,roi,task,curr_run, seedspace,atlas=seeds,array_output=True,**kwargs)
         dm = []
         for target in targets:
             if target == "None":
@@ -101,7 +118,7 @@ def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,saved_beta
                 if target == 'response':
                     dm_allruns.append(seed_ts)
                 else:
-                    target_ts = calc_target_ts_single_subj(dset,sid, target, task, curr_run,saved_beta_path=saved_beta_path)
+                    target_ts = calc_target_ts_single_subj(dset,sid, target, task, curr_run,**kwargs)
                     if separate_zscore:
                         dm.append(calculate_connectivity(target_ts,seed_ts,zscore_axis=zscore_axis,z=True))
                     else:
@@ -110,7 +127,11 @@ def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,saved_beta
                     if not separate_zscore:
                         dm = np.nan_to_num(zscore(dm, axis=zscore_axis, nan_policy='omit'))
                     dm_allruns.append(dm)
-    return np.stack(dm_allruns,axis=0)
+    try:
+        return np.stack(dm_allruns,axis=0)
+    except:
+        print("Not able to concatenate across runs, different lengths?")
+        return dm_allruns
 
 def reliability_weighting_hyperalignment(X, Y, func, voxel_reliability_scores=None, threshold=None):
     """

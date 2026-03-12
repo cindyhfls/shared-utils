@@ -23,4 +23,3 @@ def sanitize(input_fname):
 for f in Path().glob('tpl-*.nii.gz'):
     print('Sanitizing file %s' % f)
     sanitize(f)
-

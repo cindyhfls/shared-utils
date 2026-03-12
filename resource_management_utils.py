@@ -45,6 +45,8 @@ def save_args_to_json(args, output_dir=None):
     return filepath
 
 def merge_args(json_dict, cli_ns):
+    # second argument can overwrite the first
+
     merged = json_dict.copy()
     cli_dict = vars(cli_ns)
 

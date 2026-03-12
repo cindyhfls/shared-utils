@@ -56,6 +56,7 @@ def get_IS_RSA_models(data1,data2=None,metric='NN',normalize=True,diag_only=Fals
         return normalize_to_unit(similarity)
     else:
         return similarity
+
 def get_valid_pair_indices(n_total, missing):
     """
     Get valid pair in condensed distance matrix

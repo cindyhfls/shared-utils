@@ -6,7 +6,7 @@ import re
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 TianLUT = pd.read_csv(os.path.join(HERE, "support_files", "atlas-TianS1S2S3S4_combined_keylabel.tsv"), sep="\t")
-
+TianLUT_7T = pd.read_csv(os.path.join(HERE, "support_files", "atlas-TianS1S2S3S4_combined_keylabel_7T_space-MNI152NLin6Asym_res-1pt6mm.tsv"), sep="\t")
 def parse_range(s):
     out = []
     for token in s.split():
@@ -17,10 +17,13 @@ def parse_range(s):
             out.append(int(token))
     return out
 
-def return_Tian_labels(atlas_name):
+def return_Tian_labels(atlas_name,is_7T=False):
     if '_' in atlas_name:
         atlas_name = atlas_name.split('_')[0]
-    labels = np.unique(TianLUT[f'{atlas_name}_label'])
+    if is_7T:
+        labels = np.unique(TianLUT_7T[f'{atlas_name}_label'])
+    else:
+        labels = np.unique(TianLUT[f'{atlas_name}_label'])
     return list(labels)
 
 def return_aseg_labels(atlas_name='aseg'):
@@ -62,13 +65,16 @@ def get_rois_and_space(atlas,surface_space,volume_space):
         space = volume_space
     return seedrois,space
 
-def get_Tian_sls(atlas_name):
+def get_Tian_sls(atlas_name,is_7T=False):
     if '_' in atlas_name:
         atlas_name = atlas_name.split('_')[0]
-    labels = return_Tian_labels(atlas_name)
+    labels = return_Tian_labels(atlas_name,is_7T=is_7T)
     sls = []
     for label in labels:
-        idx = np.where(TianLUT[f'{atlas_name}_label'] == label)[0]
+        if is_7T:
+            idx = np.where(TianLUT_7T[f'{atlas_name}_label'] == label)[0]
+        else:
+            idx = np.where(TianLUT[f'{atlas_name}_label'] == label)[0]
         sls.append(idx)
     return sls
 
@@ -100,7 +106,7 @@ def unwrap_dm_dict(dm_dict):
     dm = np.stack(dm, axis=0)
     return dm
 
-def get_dm(dset, sids, rois, task, run, space, atlas='',saved_beta_path="",array_output = False):
+def get_dm(dset, sids, rois, task, run, space, atlas='',prep='',saved_beta_path='',array_output = False,**kwargs):
     '''
     Returns a nested dictionary by subject and roi if array_output = False, else a ndarray of shape (nSubject, nTime, nVoxels/nVertices)
     '''
@@ -113,10 +119,17 @@ def get_dm(dset, sids, rois, task, run, space, atlas='',saved_beta_path="",array
         ts = {}
         if atlas.startswith('Tian'):
             if saved_beta_path:
-                curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True})
+                assert not prep,"saved_beta_path overrides prep, remove that argument"
+                curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True},**kwargs)
             else:
-                curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,prep='default')
-            data = curr_out[0]if isinstance(curr_out, tuple) else curr_out
+                curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,prep=prep,**kwargs)
+            if isinstance(curr_out, tuple): # retained data, timemask
+                nT = len(curr_out[1])
+                nV = curr_out[0].shape[1]
+                data = np.full((nT,nV),fill_value=np.nan)
+                data[curr_out[1],:]=curr_out[0]
+            else:
+                data = curr_out
             if rois[0]=='Tian_Subcortex':
                 ts['Tian_Subcortex'] = data
             elif rois[0].endswith('lh') or rois[0].endswith('rh'): # dirty check for Tian, we could prob improve that
@@ -125,10 +138,17 @@ def get_dm(dset, sids, rois, task, run, space, atlas='',saved_beta_path="",array
         else:
             for roi in rois:
                 if saved_beta_path:
-                    curr_out = dset.get_data(sid, task, run, roi, space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True})
+                    assert not prep,"saved_beta_path overrides prep, remove that argument"
+                    curr_out = dset.get_data(sid, task, run, roi, space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True},**kwargs)
                 else:
-                    curr_out = dset.get_data(sid, task, run, roi, space=space,prep='default')
-                data = curr_out[0]if isinstance(curr_out, tuple) else curr_out
+                    curr_out = dset.get_data(sid, task, run, roi, space=space,prep=prep,**kwargs)
+                if isinstance(curr_out, tuple): # retained data, timemask
+                    nT = len(curr_out[1])
+                    nV = curr_out[0].shape[1]
+                    data = np.full((nT,nV),fill_value=np.nan)
+                    data[curr_out[1],:]=curr_out[0]
+                else:
+                    data = curr_out
                 ts[roi] = data
         dm[sid] = ts
     if array_output:
@@ -216,7 +236,7 @@ def load_isc(
     nSL_total,
     pairwise=True,
     idx_j=None,
-    sl_idx=None,          # NEW
+    sl_idx=None,
     reduce=None,          # None | "mean_pairs" | "mean_sl"
     dtype=np.float32
 ):

@@ -95,7 +95,11 @@ def calc_target_ts_single_subj(dset,sid,target,task,run,**kwargs):
     return target_ts
 
 def calculate_connectivity(ts_target,ts_seed,zscore_axis=0,z=True, metric='correlation'):
-    conn = 1 - cdist(ts_target.T, ts_seed.T, metric)
+    '''
+    ts_target, ts_seed in shape (nT,nV)
+    '''
+    finite_mask = np.isfinite(ts_target[:,0])
+    conn = 1 - cdist(ts_target[finite_mask,:].T, ts_seed[finite_mask,:].T, metric)
     if z:
         conn = np.nan_to_num(zscore(conn, axis=zscore_axis, nan_policy='omit'))
     return conn

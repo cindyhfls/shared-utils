@@ -296,7 +296,9 @@ def rdm_features_all_subjects(X,dtype=np.float32,metric="correlation"):
     feats = np.empty((N, L), dtype=dtype)
     for s in range(N):
         feats[s] = pdist(X[s], metric=metric)
+
     return np.nan_to_num(feats)
+
 
 def compute_targets_ts_from_mapping(dms_lr, source_space, target_space, mask=True, lr = "lr", dtype=np.float32):
     mapping = nb.mapping(lr, source_space, target_space, mask=mask)

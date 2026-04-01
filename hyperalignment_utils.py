@@ -94,15 +94,82 @@ def calc_target_ts_single_subj(dset,sid,target,task,run,**kwargs):
         target_ts = get_target_ts(target_ts,'searchlight_mean')
     return target_ts
 
-def calculate_connectivity(ts_target,ts_seed,zscore_axis=0,z=True, metric='correlation'):
-    '''
-    ts_target, ts_seed in shape (nT,nV)
-    '''
-    finite_mask = np.isfinite(ts_target[:,0])
-    conn = 1 - cdist(ts_target[finite_mask,:].T, ts_seed[finite_mask,:].T, metric)
+def calculate_connectivity(ts_target, ts_seed, zscore_axis=0, z=True, metric='dot_product_correlation',counts=None,skip_zscore=False,dtype=np.float64):
+    """
+    ts_target, ts_seed: (nT, nV)
+    returns: (nV_target, nV_seed)
+    """
+    X = ts_target.astype(dtype)  # scipy used float64 as default so the dtype of float64 would match scipy result
+    Y = ts_seed.astype(dtype)
+
+    if metric=='dot_product_correlation':
+        if not skip_zscore:
+            if counts is None:
+                X = X - np.mean(X, axis=0)
+                std_x = np.std(X, axis=0)
+                std_x[std_x == 0] = 1.0
+                X /= std_x
+                Y = Y - np.mean(Y, axis=0)
+                std_y = np.std(Y, axis=0)
+                std_y[std_y == 0] = 1.0
+                Y /= std_y
+            else:
+                X = X - np.nanmean(X, axis=0)
+                std_x = np.nanstd(X, axis=0)
+                std_x[std_x == 0] = 1.0
+                X /= std_x
+                Y = Y - np.nanmean(Y, axis=0)
+                std_y = np.nanstd(Y, axis=0)
+                std_y[std_y == 0] = 1.0
+                Y /= std_y
+                X = np.nan_to_num(X)
+                Y = np.nan_to_num(Y)
+        T = counts if counts is not None else X.shape[0]
+        conn = (X.T @ Y) / T
+        conn[conn == 0] = np.nan
+    else:
+        assert counts is None and not skip_zscore,"only for data that has not been scrubbed"
+        conn = 1 - cdist(X.T, Y.T, metric)
     if z:
-        conn = np.nan_to_num(zscore(conn, axis=zscore_axis, nan_policy='omit'))
+        conn = conn - np.nanmean(conn, axis=zscore_axis, keepdims=True)
+        std = np.nanstd(conn, axis=zscore_axis, keepdims=True)
+        std[std==0]=1.0
+        conn = np.nan_to_num(conn / std)
     return conn
+# def calculate_connectivity(ts_target, ts_seed, zscore_axis=0, z=True, metric='dot_product_correlation',counts=None,skip_zscore=False):
+#     """
+#     ts_target, ts_seed: (nT, nV)
+#     returns: (nV_target, nV_seed)
+#     """
+#     X = ts_target
+#     Y = ts_seed
+
+#     if metric=='dot_product_correlation':
+#         if not skip_zscore:
+#             if counts is None:
+#                 X = X - np.mean(X,axis=0)
+#                 X /= np.std(X, axis=0).clip(1e-8)
+#                 Y = Y - np.mean(Y, axis=0)
+#                 Y /= np.std(Y,axis=0).clip(1e-8)
+#             else:
+#                 X = X - np.nanmean(X,axis=0)
+#                 X /= np.nanstd(X, axis=0).clip(1e-8)
+#                 Y = Y - np.nanmean(Y, axis=0)
+#                 Y /= np.nanstd(Y,axis=0).clip(1e-8)
+#                 X = np.nan_to_num(X)
+#                 Y = np.nan_to_num(Y)
+#         T = counts if counts is not None else X.shape[0]
+#         conn = (X.T @ Y) / T
+#         conn[conn == 0] = np.nan
+#     else:
+#         assert counts is None and skip_zscore,"only for data that has not been scrubbed"
+#         conn = 1 - cdist(X.T, Y.T, metric)
+#     if z:
+#         conn = conn - np.nanmean(conn, axis=zscore_axis, keepdims=True)
+#         std = np.nanstd(conn, axis=zscore_axis, keepdims=True).clip(1e-8)
+#         conn = np.nan_to_num(conn / std)
+#         # conn = np.nan_to_num(zscore(conn, axis=zscore_axis, nan_policy="omit"))
+#     return conn
 
 def calc_dm_across_runs(dset,sid,roi,seedspace,targets,seeds,task,run,separate_zscore=True,zscore_axis=0,**kwargs):
     if not isinstance(targets,list):

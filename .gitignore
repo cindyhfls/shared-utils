@@ -29,3 +29,4 @@ htmlcov/
 venv/
 ENV/
 support_files/
+tests/

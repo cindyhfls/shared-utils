@@ -126,8 +126,9 @@ def get_dm(dset, sids, rois, task, run, space, atlas='',prep='',saved_beta_path=
             if isinstance(curr_out, tuple): # retained data, timemask
                 nT = len(curr_out[1])
                 nV = curr_out[0].shape[1]
-                data = np.full((nT,nV),fill_value=np.nan)
-                data[curr_out[1],:]=curr_out[0]
+                data = curr_out[0]
+                # data = np.full((nT,nV),fill_value=np.nan)
+                # data[curr_out[1],:]=curr_out[0]
             else:
                 data = curr_out
             if rois[0]=='Tian_Subcortex':
@@ -145,8 +146,9 @@ def get_dm(dset, sids, rois, task, run, space, atlas='',prep='',saved_beta_path=
                 if isinstance(curr_out, tuple): # retained data, timemask
                     nT = len(curr_out[1])
                     nV = curr_out[0].shape[1]
-                    data = np.full((nT,nV),fill_value=np.nan)
-                    data[curr_out[1],:]=curr_out[0]
+                    data = curr_out[0]
+                    # data = np.full((nT,nV),fill_value=np.nan)
+                    # data[curr_out[1],:]=curr_out[0]
                 else:
                     data = curr_out
                 ts[roi] = data

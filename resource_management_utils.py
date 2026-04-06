@@ -16,8 +16,6 @@ def load_args_from_json(json_file):
         config['cv_alphas'] = [float(x) for x in config['cv_alphas']]
     if 'run' in config and isinstance(config['run'], list):
         config['run'] = [int(x) for x in config['run']]
-    if 'subj' in config and isinstance(config['subj'], list):
-        config['subj'] = [int(x) for x in config['subj']]
     return config
 
 def save_args_to_json(args, output_dir=None):

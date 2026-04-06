@@ -1,3 +1,6 @@
+'''
+Helper function to call nilearn to plot on subcortical structures
+'''
 import nilearn as nli
 from nilearn import image, plotting
 import os

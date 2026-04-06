@@ -14,6 +14,7 @@ import os
 import numpy as np
 import neuroboros as nb
 import pandas as pd
+from shared_utils.isc_utils import FisherAvg
 
 # PCA linear ridge regression (did I write this? maybe use Feilong's existing code from the INT repo)
 def PCA_ridge(X,y,pca_n_comps=[50, 100, 150],ridge_alphas=np.logspace(-2, 4, 8)):
@@ -36,7 +37,7 @@ def PCA_ridge(X,y,pca_n_comps=[50, 100, 150],ridge_alphas=np.logspace(-2, 4, 8))
     )
 
     gs.fit(X, y)
-    # print("Best CV R2:", gs.best_score_)
+    print("Best CV R2:", gs.best_score_)
     return gs
 
 def make_folds_family_optional(
@@ -108,20 +109,23 @@ def _nan_report(M, name):
         f"{name}_nan_cols": np.where(np.isnan(M).any(axis=0))[0].astype(int).tolist()[:20],
     }
 
-def _normalize_kernel(K: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """
-    Normalize a square kernel so that K_ii becomes 1 (when diag > 0), via:
-        K_ij <- K_ij / sqrt(K_ii * K_jj)
-
-    NOTE: This function requires K to be square because it uses diag(K).
-    """
-    K = np.asarray(K, dtype=np.float64)
-    if K.ndim != 2 or K.shape[0] != K.shape[1]:
-        raise ValueError(f"_normalize_kernel expects a square matrix. Got {K.shape}.")
-    d = np.diag(K).copy()
-    d = np.maximum(d, eps)
-    denom = np.sqrt(np.outer(d, d))
-    return K / denom
+# NOTE: _normalize_kernel is a no-op when called after np.fill_diagonal(S, 1.0),
+# because all diagonal entries are 1 → denom = sqrt(1*1) = 1 for every entry.
+# The normalize parameter in fit_similarity_model is therefore kept but disabled.
+# def _normalize_kernel(K: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+#     """
+#     Normalize a square kernel so that K_ii becomes 1 (when diag > 0), via:
+#         K_ij <- K_ij / sqrt(K_ii * K_jj)
+#
+#     NOTE: This function requires K to be square because it uses diag(K).
+#     """
+#     K = np.asarray(K, dtype=np.float64)
+#     if K.ndim != 2 or K.shape[0] != K.shape[1]:
+#         raise ValueError(f"_normalize_kernel expects a square matrix. Got {K.shape}.")
+#     d = np.diag(K).copy()
+#     d = np.maximum(d, eps)
+#     denom = np.sqrt(np.outer(d, d))
+#     return K / denom
 
 def _corr(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     yt = y_true - np.mean(y_true)
@@ -148,7 +152,6 @@ def fit_similarity_model(
     precomputed: bool = True,
     kernel: str = "rbf",               # used only when precomputed=False
     gammas: np.ndarray | None = None,  # used only when precomputed=False and kernel='rbf'
-    normalize: bool = True,
     scoring: Literal["corr", "r2","mse"] = "corr",
     n_splits: int = 5,
     n_repeats: int = 1,
@@ -189,7 +192,7 @@ def fit_similarity_model(
             raise ValueError(f"y must have length N={S.shape[0]}. Got {y.shape[0]}.")
         S = S.copy()
         np.fill_diagonal(S, 1.0)
-        K = _normalize_kernel(S) if normalize else S
+        K = S
     else:
         # S is raw feature matrix
         if S.ndim == 1:
@@ -325,7 +328,10 @@ def fit_similarity_model(
                 param_to_scores[key].append(s)
 
         # Pick best param this repeat
-        mean_scores = {k: float(np.mean(v)) for k, v in param_to_scores.items()}
+        if scoring =="corr":
+            mean_scores = {k: float(FisherAvg(v)) for k, v in param_to_scores.items()}
+        else:
+            mean_scores = {k: float(np.mean(v)) for k, v in param_to_scores.items()}
         best_key = max(mean_scores, key=mean_scores.get)
         best_score = mean_scores[best_key]
         best_params = dict(best_key)
@@ -375,15 +381,14 @@ def fit_similarity_model(
         "method": method,
         "precomputed": precomputed,
         "kernel": kernel if not precomputed else "precomputed",
-        "normalize": normalize,
         "scoring": scoring,
         "n_splits": n_splits,
         "n_repeats": n_repeats,
         "best_params": best_params_final,
         "repeat_best_params": repeat_best_params,
         "repeat_best_scores": np.array(repeat_best_scores, dtype=float),
-        "mean_repeat_best_score": float(np.mean(repeat_best_scores)),
-        "std_repeat_best_score": float(np.std(repeat_best_scores)),
+        # "mean_repeat_best_score": float(np.mean(repeat_best_scores)),
+        # "std_repeat_best_score": float(np.std(repeat_best_scores)),
         "cv_mean_scores_per_repeat": cv_scores,  # dicts: param->mean score
     }
     return final_model, info

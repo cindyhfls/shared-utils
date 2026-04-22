@@ -306,6 +306,149 @@ def IS_RSA_variance_partitioning(neural_similarity, bx_similarity, perm=[],
 
     return results
 
+def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
+                                     groups=None, n_jobs=-1, checkpoint_dir=None):
+    """
+    Freedman-Lane version of IS_RSA_variance_partitioning.
+
+    Instead of permuting X (behavioral similarity), this permutes Y residuals
+    after removing all predictors except the target. This gives a tighter null
+    distribution for group tests when predictors are orthogonal, because the
+    null only captures variance unexplained by other predictors.
+
+    Efficiency: all lstsq calls are precomputed once per target. The permutation
+    loop uses only matrix multiplications via a precomputed orthonormal basis U
+    for the target predictors:
+        unique_R2_perm = ||U.T @ R_p||^2 / SS_tot(Y_hat + R_p)
+    where R_p = residuals[perm_condensed].
+
+    Trade-off: O(n_targets x n_perm) passes vs O(n_perm) for the original, but
+    each pass is much cheaper (no lstsq per permutation).
+
+    Note: partial_r p-values are not computed (unique_r2 only).
+    """
+    names    = list(bx_similarity.keys())
+    X_ranked = np.column_stack([
+        rankdata(bx_similarity[k]).astype(float) for k in names
+    ])
+    Y_ranked = rankdata(neural_similarity, axis=1).astype(float).T
+    nvalid   = Y_ranked.shape[0]
+
+    # ── observed stats (identical to original) ────────────────────
+    obs_partial_r, obs_unique_r2, obs_total_r2 = _compute_metrics_batch(
+        Y_ranked, X_ranked, names
+    )
+    obs_group_unique_r2 = {}
+    if groups is not None:
+        for grp_name, grp_members in groups.items():
+            keep_idx = [i for i, n in enumerate(names) if n not in grp_members]
+            if len(keep_idx) == 0:
+                obs_group_unique_r2[grp_name] = obs_total_r2.copy()
+            else:
+                obs_group_unique_r2[grp_name] = np.maximum(
+                    0.0, obs_total_r2 - _ols_r2_batch(Y_ranked, X_ranked[:, keep_idx])
+                )
+
+    results = defaultdict(dict)
+    results['full_model']['r2'] = obs_total_r2
+    for name in names:
+        results[name]['partial_r'] = obs_partial_r[name]
+        results[name]['unique_r2'] = obs_unique_r2[name]
+    for grp_name in (groups or {}):
+        results[grp_name]['unique_r2'] = obs_group_unique_r2[grp_name]
+
+    if not perm:
+        return results
+
+    n_subjects = len(perm[0])
+    perm_condensed_list = [_condensed_perm_idx(n_subjects, p) for p in perm]
+
+    # ── precompute quantities for FL null (no lstsq in permutation loop) ──
+    def _fl_precompute(keep_idx, target_idx):
+        """
+        Returns (Y_hat, residuals, U, Y_hat_c, SS_yhat):
+          U       : (nvalid, k_target) orthonormal basis for target predictors
+                    after projecting out the reduced model — numerator = ||U.T @ R_p||^2
+          Y_hat_c : Y_hat - mean(Y_hat), for SS_tot computation
+          SS_yhat : ||Y_hat_c||^2 per searchlight
+        """
+        if len(keep_idx) == 0:
+            X_other_c = np.ones((nvalid, 1))
+        else:
+            X_other_c = np.column_stack([X_ranked[:, keep_idx], np.ones(nvalid)])
+
+        # fit reduced model → Y_hat and residuals
+        coef, _, _, _ = np.linalg.lstsq(X_other_c, Y_ranked, rcond=None)
+        Y_hat     = X_other_c @ coef
+        residuals = Y_ranked - Y_hat
+
+        # orthonormal basis U for target predictors after projecting out X_reduced
+        X_target = X_ranked[:, target_idx]  # (nvalid, k_target)
+        coef_x, _, _, _ = np.linalg.lstsq(X_other_c, X_target, rcond=None)
+        X_target_orth = X_target - X_other_c @ coef_x   # residualize target on reduced
+        U, _ = np.linalg.qr(X_target_orth)              # (nvalid, k_target)
+        U = U[:, :X_target_orth.shape[1]]
+
+        Y_hat_c = Y_hat - Y_hat.mean(axis=0)
+        SS_yhat = np.sum(Y_hat_c ** 2, axis=0)
+        return residuals, U, Y_hat_c, SS_yhat
+
+    def _fl_null(keep_idx, target_idx, obs):
+        residuals, U, Y_hat_c, SS_yhat = _fl_precompute(keep_idx, target_idx)
+
+        def _worker(pc):
+            R_p   = residuals[pc]                              # (nvalid, nsearchlights)
+            R_p_c = R_p - R_p.mean(axis=0)
+            numer = np.sum((U.T @ R_p) ** 2, axis=0)          # ||U.T R_p||^2
+            cross = np.sum(Y_hat_c * R_p_c, axis=0)
+            denom = SS_yhat + 2 * cross + np.sum(R_p_c ** 2, axis=0)
+            return np.where(denom > 0, np.maximum(0.0, numer / denom), 0.0)
+
+        null = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(_worker)(pc) for pc in perm_condensed_list
+        )
+        return np.stack(null)   # (nperm, nsearchlights)
+
+    # ── individual predictors ──────────────────────────────────────
+    for i, name in enumerate(names):
+        ckpt_file = os.path.join(checkpoint_dir, f'null_{name}.npy') if checkpoint_dir else None
+        if ckpt_file and os.path.exists(ckpt_file):
+            print(f'  [ckpt] loading null for {name}')
+            null = np.load(ckpt_file)
+        else:
+            other_idx = [j for j in range(len(names)) if j != i]
+            null = _fl_null(other_idx, [i], obs_unique_r2[name])
+            if ckpt_file:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                np.save(ckpt_file, null)
+                print(f'  [ckpt] saved null for {name}')
+        pu, pl, pt = _pvals(obs_unique_r2[name], null)
+        results[name]['p-upper-unique_r2']   = pu
+        results[name]['p-lower-unique_r2']   = pl
+        results[name]['p-twotail-unique_r2'] = pt
+
+    # ── groups ────────────────────────────────────────────────────
+    for grp_name, grp_members in (groups or {}).items():
+        safe_name = grp_name.replace('/', '_')
+        ckpt_file = os.path.join(checkpoint_dir, f'null_grp_{safe_name}.npy') if checkpoint_dir else None
+        if ckpt_file and os.path.exists(ckpt_file):
+            print(f'  [ckpt] loading null for group {grp_name}')
+            null = np.load(ckpt_file)
+        else:
+            keep_idx   = [i for i, n in enumerate(names) if n not in grp_members]
+            target_idx = [i for i, n in enumerate(names) if n in grp_members]
+            null = _fl_null(keep_idx, target_idx, obs_group_unique_r2[grp_name])
+            if ckpt_file:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                np.save(ckpt_file, null)
+                print(f'  [ckpt] saved null for group {grp_name}')
+        pu, pl, pt = _pvals(obs_group_unique_r2[grp_name], null)
+        results[grp_name]['p-upper-unique_r2']   = pu
+        results[grp_name]['p-lower-unique_r2']   = pl
+        results[grp_name]['p-twotail-unique_r2'] = pt
+
+    return results
+
 def check_kernel_multicollinearity(bx_similarity, rank=True):
     """
     Check multicollinearity among model kernels by computing pairwise

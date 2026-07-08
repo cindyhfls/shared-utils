@@ -42,6 +42,77 @@ def pairwise_corrsim_dot(X, dtype=np.float32,skip_zscore=False, has_nan=False):
     iu = np.triu_indices(N, k=1)
     return C[iu].astype(dtype, copy=False)
 
+def pairwise_corrsim_dot_xy(X, Y, dtype=np.float32, has_nan=False, nan=None):
+    """
+    Pairwise Pearson correlation similarity between rows of X and rows of Y.
+
+    Parameters
+    ----------
+    X : array, shape (N, F) or (N, ...)
+    Y : array, shape (M, F) or (M, ...)  # must match feature size after reshape
+    dtype : np dtype
+        Working dtype.
+    has_nan : bool
+        If True, z-score with nanmean/nanstd and normalize each pair by the
+        number of jointly-valid columns instead of the full feature count.
+    nan : float or None
+        If not None, replace NaNs in output with this value.
+
+    Returns
+    -------
+    C : array, shape (N, M)
+        C[i, j] = corr( X[i], Y[j] ) computed across flattened features.
+        Equivalent to: 1 - cdist(X, Y, metric="correlation") (up to fp precision).
+    """
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if X.ndim < 2 or Y.ndim < 2:
+        raise ValueError("Expected X and Y to have shape (N, ...) and (M, ...).")
+
+    Fx = X.reshape(X.shape[0], -1).astype(dtype, copy=True)  # (N, F)
+    Fy = Y.reshape(Y.shape[0], -1).astype(dtype, copy=True)  # (M, F)
+
+    if Fx.shape[1] != Fy.shape[1]:
+        raise ValueError(f"Feature mismatch: X has {Fx.shape[1]} features, Y has {Fy.shape[1]}.")
+
+    if has_nan:
+        valid_x = np.isfinite(Fx)
+        valid_y = np.isfinite(Fy)
+        Fx -= np.nanmean(Fx, axis=1, keepdims=True)
+        Fy -= np.nanmean(Fy, axis=1, keepdims=True)
+        sx = np.nanstd(Fx, axis=1, keepdims=True)
+        sy = np.nanstd(Fy, axis=1, keepdims=True)
+        sx[sx == 0] = 1.0
+        sy[sy == 0] = 1.0
+        Fx /= sx
+        Fy /= sy
+        Fx = np.nan_to_num(Fx)
+        Fy = np.nan_to_num(Fy)
+    else:
+        Fx -= Fx.mean(axis=1, keepdims=True)
+        Fy -= Fy.mean(axis=1, keepdims=True)
+
+        sx = Fx.std(axis=1, keepdims=True)
+        sy = Fy.std(axis=1, keepdims=True)
+        sx[sx == 0] = 1.0
+        sy[sy == 0] = 1.0
+
+        Fx /= sx
+        Fy /= sy
+
+    num = Fx @ Fy.T
+    if has_nan:
+        counts_mat = valid_x.astype(np.float32) @ valid_y.astype(np.float32).T  # (N, M)
+    else:
+        counts_mat = Fx.shape[1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        C = num / counts_mat
+
+    if nan is not None:
+        C = np.nan_to_num(C, copy=False, nan=nan)
+
+    return C.astype(dtype, copy=False)
+
 def pairwise_corrsim_dot_avg(X,dtype=np.float32):
     """
     X: (N, F) or (N, ...)

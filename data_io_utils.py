@@ -56,12 +56,15 @@ def get_rois_and_space(atlas,surface_space,volume_space):
         space = surface_space
     elif atlas.startswith('Tian'):
         if 'wholebrain' in atlas:
-            seedrois = 'Tian_Subcortex',
+            seedrois = ['Tian_Subcortex']
         else:
             seedrois = return_Tian_labels(atlas)
         space = volume_space
     elif atlas.startswith('aseg'):
-        seedrois = return_aseg_labels(atlas)
+        if 'wholebrain' in atlas:
+            seedrois = ['aseg_Subcortex']
+        else:
+            seedrois = return_aseg_labels(atlas)
         space = volume_space
     return seedrois,space
 
@@ -106,7 +109,7 @@ def unwrap_dm_dict(dm_dict):
     dm = np.stack(dm, axis=0)
     return dm
 
-def get_dm(dset, sids, rois, task, run, space, atlas='',prep='',saved_beta_path='',array_output = False,**kwargs):
+def get_dm(dset, sids, rois, task, run, space, atlas='',saved_beta_path='',array_output = False,**kwargs):
     '''
     Returns a nested dictionary by subject and roi if array_output = False, else a ndarray of shape (nSubject, nTime, nVoxels/nVertices)
     '''
@@ -119,10 +122,9 @@ def get_dm(dset, sids, rois, task, run, space, atlas='',prep='',saved_beta_path=
         ts = {}
         if atlas.startswith('Tian'):
             if saved_beta_path:
-                assert not prep,"saved_beta_path overrides prep, remove that argument"
                 curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True},**kwargs)
             else:
-                curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,prep=prep,**kwargs)
+                curr_out = dset.get_data(sid, task, run, 'Tian_Subcortex', space=space,**kwargs)
             if isinstance(curr_out, tuple): # retained data, timemask
                 nT = len(curr_out[1])
                 nV = curr_out[0].shape[1]
@@ -136,13 +138,19 @@ def get_dm(dset, sids, rois, task, run, space, atlas='',prep='',saved_beta_path=
             elif rois[0].endswith('lh') or rois[0].endswith('rh'): # dirty check for Tian, we could prob improve that
                 ts,labels = convert_dataarray_to_dictionary_byroi(data, atlas) # e.g. 'TianS1'
                 assert(rois==labels)
+        elif  atlas == 'aseg_Subcortex':
+            if saved_beta_path:
+                curr_out = dset.get_data(sid, task, run, 'aseg_Subcortex', space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True},**kwargs)
+            else:
+                curr_out = dset.get_data(sid, task, run, 'aseg_Subcortex', space=space,**kwargs)
+            if rois[0]=='aseg_Subcortex':
+                ts['aseg_Subcortex'] = curr_out
         else:
             for roi in rois:
                 if saved_beta_path:
-                    assert not prep,"saved_beta_path overrides prep, remove that argument"
                     curr_out = dset.get_data(sid, task, run, roi, space=space,prep='saved_beta',prep_kwargs={'saved_beta_path':saved_beta_path,'load_beta':True},**kwargs)
                 else:
-                    curr_out = dset.get_data(sid, task, run, roi, space=space,prep=prep,**kwargs)
+                    curr_out = dset.get_data(sid, task, run, roi, space=space,**kwargs)
                 if isinstance(curr_out, tuple): # retained data, timemask
                     nT = len(curr_out[1])
                     nV = curr_out[0].shape[1]
@@ -239,7 +247,7 @@ def load_isc(
     pairwise=True,
     idx_j=None,
     sl_idx=None,
-    reduce=None,          # None | "mean_pairs" | "mean_sl"
+    reduce=None,          # None | "mean_pairs" | "mean_sl" | "fisher_pairs" | "fisher_sl"
     dtype=np.float32
 ):
     """
@@ -287,6 +295,14 @@ def load_isc(
     elif reduce == "mean_sl":
         sum_pairs = np.zeros(nPairs_subset, dtype=np.float64)
         cnt_pairs = np.zeros(nPairs_subset, dtype=np.int64)
+
+    elif reduce == "fisher_pairs":
+        out = np.empty(len(sl_idx), dtype=dtype)
+        out_row = 0
+
+    elif reduce == "fisher_sl":
+        sum_atanh = np.zeros(nPairs_subset, dtype=np.float64)
+        cnt_pairs = np.zeros(nPairs_subset, dtype=np.int64)
     else:
         raise ValueError("Invalid reduce mode")
 
@@ -327,10 +343,28 @@ def load_isc(
             sum_pairs += np.nansum(sub, axis=0)
             cnt_pairs += finite.sum(axis=0)
 
+        elif reduce == "fisher_pairs":
+            out[out_row:out_row + sub.shape[0]] = np.tanh(np.nanmean(np.atanh(sub), axis=1))
+            out_row += sub.shape[0]
+
+        elif reduce == "fisher_sl":
+            finite = np.isfinite(sub)
+            sum_atanh += np.nansum(np.atanh(sub), axis=0)
+            cnt_pairs += finite.sum(axis=0)
+
         del mm, sub
 
     if reduce == "mean_sl":
         out = (sum_pairs / cnt_pairs).astype(dtype)
+
+        if idx_j is not None:
+            A, B = grid.shape
+            tmp = np.full((A, B), np.nan, dtype=out.dtype)
+            tmp[~self_mask] = out
+            out = tmp
+
+    elif reduce == "fisher_sl":
+        out = np.tanh(sum_atanh / cnt_pairs).astype(dtype)
 
         if idx_j is not None:
             A, B = grid.shape

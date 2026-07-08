@@ -15,30 +15,46 @@ import numpy as np
 import neuroboros as nb
 import pandas as pd
 from shared_utils.isc_utils import FisherAvg
+from scipy.linalg import eigh, svd, LinAlgError
 
-# PCA linear ridge regression (did I write this? maybe use Feilong's existing code from the INT repo)
-def PCA_ridge(X,y,pca_n_comps=[50, 100, 150],ridge_alphas=np.logspace(-2, 4, 8)):
-    pipe = Pipeline([
-        ("pca", PCA()),
-        ("ridge", Ridge())
-    ])
+def check_PSD(K, eps = 1e-8):
+    eigvals = np.linalg.eigvalsh(K)  # eigvalsh assumes symmetric, faster
+    is_psd = np.all(eigvals >= -eps)  # small tolerance for float errors
+    if ~is_psd:
+        print(eigvals[eigvals<0])
+    return is_psd
 
-    param_grid = {
-        "pca__n_components": pca_n_comps,
-        "ridge__alpha": ridge_alphas
-    }
+def get_connectivity_PCs(triu, mask=None,eps=1e-7):
+    """
+    Adapt from https://github.com/feilong/IDM_pred/blob/main/package/IDM_pred/io/__init__.py
+    This function outputs a 2-D NumPy array which is the input `X` of the prediction pipeline. The shape of the 2-D array is (n_subjects, n_PCs).
+    Each row is a sample, i.e., the PCs of a subject's connectivity profile. Each column is a feature, i.e., a PC's score across all subjects.
+    The function loads npy files which contain upper triangles of individual differences matrices (IDMs). See https://github.com/feilong/IDM_pred#data for details.
 
-    gs = GridSearchCV(
-        pipe,
-        param_grid,
-        cv=5,
-        scoring="r2",
-        n_jobs=-1
-    )
+    Parameters
+    triu : vectorized upper triangle of the IDM (1-D array of length n_subjects*(n_subjects-1)/2)
+    mask : boolean array of length n_subjects, optional
+    eps : float, default=1e-7
+        The tolerance parameter for eigenvalue decomposition.
 
-    gs.fit(X, y)
-    print("Best CV R2:", gs.best_score_)
-    return gs
+    Returns
+    -------
+    X : ndarray of shape (n_subjects, n_PCs)
+    """
+    ns = int((1 + np.sqrt(1 + 8*len(triu))) / 2)
+    mat = np.zeros((ns, ns))
+    triu_idx = np.triu_indices(ns, k=1)
+    mat[triu_idx] = v
+    np.fill_diagonal(mat, 1.0)
+    w, v = eigh(mat, lower=False)
+    if mask is not None:
+        mat = mat[mask][:,mask]
+    w, v = eigh(mat, lower=False)
+    assert np.all(w > -eps)
+    w[w < 0] = 0
+    U, s = v[:, ::-1][:, :-1], np.sqrt(w[::-1][:-1])
+    X = (U * s[np.newaxis])
+    return X
 
 def make_folds_family_optional(
     t: pd.DataFrame,
@@ -144,6 +160,362 @@ def fold_score(y_true, y_pred,scoring):
     else:
         raise ValueError("scoring must be 'corr','mse', or 'r2'.")
 
+def _ridge_svd(X_train, X_test, y_train, alpha, npc, fit_intercept=True):
+    """
+    SVD-based ridge regression in PC space.
+    Adapted from ABCD_hyperalignment_JNeurosci/ridge.py.
+
+    X_train : (n_train, n_features)
+    X_test  : (n_test,  n_features)
+    npc     : number of leading PCs to retain (None = all)
+    """
+    if fit_intercept:
+        X_offset = np.mean(X_train, axis=0, keepdims=True)
+        y_offset = np.mean(y_train)
+        X_train  = X_train - X_offset
+        y_train  = y_train - y_offset
+        X_test   = X_test  - X_offset
+    try:
+        U, s, Vt = svd(X_train, full_matrices=False)
+    except LinAlgError:
+        U, s, Vt = svd(X_train, full_matrices=False, lapack_driver='gesvd')
+    X_test_V = X_test @ Vt.T[:, :npc]
+    UT_y     = U.T[:npc] @ y_train
+    d        = 1.0 / (s[:npc] + alpha)
+    yhat     = X_test_V @ (d * UT_y)
+    if fit_intercept:
+        yhat += y_offset
+    return yhat
+
+
+def fit_pc_ridge(S_train, S_test, y_train, fold_labels_train,
+                 scoring='r2', alphas=None, npc_fracs=None, fit_intercept=True):
+    """
+    Inner-CV grid search over (alpha, npc) then predict on S_test.
+
+    S_train          : (n_train, n_train)  — similarity matrix used as feature matrix
+    S_test           : (n_test,  n_train)
+    fold_labels_train: 1-D int array of inner CV fold assignments for training subjects
+    npc_fracs        : fractions of n_train to use as npc candidates (default auto)
+
+    Returns y_hat (n_test,), info dict.
+    """
+    n_train = S_train.shape[0]
+    if alphas is None:
+        alphas = np.logspace(-9, 6, 16)
+    if npc_fracs is None:
+        npc_fracs = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+    npcs = np.unique(np.maximum(1, np.round(np.array(npc_fracs) * n_train).astype(int)))
+
+    unique_folds = np.unique(fold_labels_train)
+    score_sums   = np.zeros((len(alphas), len(npcs)))
+
+    for val_fold in unique_folds:
+        tr  = fold_labels_train != val_fold
+        val = fold_labels_train == val_fold
+        Xtr  = S_train[np.ix_(tr,  tr)]
+        Xval = S_train[np.ix_(val, tr)]
+        ytr  = y_train[tr]
+        yval = y_train[val]
+
+        if fit_intercept:
+            X_off = np.mean(Xtr, axis=0, keepdims=True)
+            y_off = np.mean(ytr)
+            Xtr_c  = Xtr  - X_off
+            Xval_c = Xval - X_off
+            ytr_c  = ytr  - y_off
+        else:
+            Xtr_c, Xval_c, ytr_c, y_off = Xtr, Xval, ytr, 0.0
+
+        try:
+            U, s, Vt = svd(Xtr_c, full_matrices=False)
+        except LinAlgError:
+            U, s, Vt = svd(Xtr_c, full_matrices=False, lapack_driver='gesvd')
+
+        UT_y  = U.T @ ytr_c          # (k,)
+        Xval_V = Xval_c @ Vt.T       # (n_val, k)
+
+        for ia, alpha in enumerate(alphas):
+            d      = 1.0 / (s + alpha)      # (k,) — KRR-equivalent weights
+            d_UT_y = d * UT_y               # (k,)
+            for in_, npc in enumerate(npcs):
+                yhat  = Xval_V[:, :npc] @ d_UT_y[:npc] + y_off
+                score_sums[ia, in_] += fold_score(yval, yhat, scoring)
+
+    score_grid = score_sums / len(unique_folds)
+    best_ia, best_in = np.unravel_index(np.argmax(score_grid), score_grid.shape)
+    best_alpha = float(alphas[best_ia])
+    best_npc   = int(npcs[best_in])
+
+    y_hat = _ridge_svd(S_train, S_test, y_train, best_alpha, best_npc, fit_intercept)
+    info  = {"best_params": {"alpha": best_alpha, "npc": best_npc,
+                              "npc_frac": best_npc / n_train}}
+    return y_hat, info
+
+
+def pc_ridge_loocv_outer(S_full, y_full,
+                         scoring='r2', alphas=None, npc_fracs=None, fit_intercept=True):
+    """
+    Hat-matrix LOOCV used as the **outer** prediction loop (IDM_pred style).
+
+    Every subject is left out once; their prediction ŷ_loocv[i] uses only the
+    other N-1 subjects.  Hyperparameters (alpha, npc) are selected globally by
+    maximising the LOOCV score over all N subjects.
+
+    Returns the LOOCV predictions directly (not a refit on the full data),
+    so R²(y_full, y_loocv) is directly comparable to a 5-fold outer-CV R².
+
+    O(N³) — one SVD, then O(N²) per (alpha, npc) combo.
+    """
+    n = S_full.shape[0]
+    if alphas is None:
+        alphas = np.logspace(-9, 6, 16)
+    if npc_fracs is None:
+        npc_fracs = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+    npcs = np.unique(np.maximum(1, np.round(np.array(npc_fracs) * n).astype(int)))
+
+    if fit_intercept:
+        X_off = np.mean(S_full, axis=0, keepdims=True)
+        y_off = float(np.mean(y_full))
+        S_c   = S_full - X_off
+        y_c   = y_full - y_off
+    else:
+        S_c, y_c, y_off = S_full, y_full, 0.0
+
+    try:
+        U, s, _ = svd(S_c, full_matrices=False)
+    except LinAlgError:
+        U, s, _ = svd(S_c, full_matrices=False, lapack_driver='gesvd')
+
+    UT_y = U.T @ y_c
+    U2   = U ** 2
+
+    best_score   = -np.inf
+    best_alpha   = float(alphas[0])
+    best_npc     = int(npcs[-1])
+    best_y_loocv = np.full(n, np.nan)
+
+    for alpha in alphas:
+        # omd = α/(s+α).  Both e and denom scale as alpha, so their ratio is
+        # well-conditioned for all alpha > 0 — no threshold or fallback needed.
+        omd = alpha / (s + alpha)
+        for npc in npcs:
+            e     = U[:, :npc] @ (omd[:npc] * UT_y[:npc])   # (I−H)y_c, stable
+            denom = U2[:, :npc] @ omd[:npc]                   # 1−H_diag, always > 0 for alpha > 0
+            # alpha cancels in e/denom → ratio is independent of alpha magnitude
+            y_loocv = y_full - e / np.maximum(denom, np.finfo(float).tiny)
+
+            sc = fold_score(y_full, y_loocv, scoring)
+            if sc > best_score:
+                best_score   = sc
+                best_alpha   = float(alpha)
+                best_npc     = int(npc)
+                best_y_loocv = y_loocv.copy()
+
+    info = {"best_params": {"alpha": best_alpha, "npc": best_npc,
+                            "npc_frac": best_npc / n},
+            "loocv_score": best_score}
+    return best_y_loocv, info
+
+
+def fit_pc_ridge_loocv_hat(S_train, S_test, y_train,
+                           scoring='r2', alphas=None, npc_fracs=None, fit_intercept=True):
+    """
+    pc_ridge with hyperparameter selection via analytical LOOCV (Hat-matrix shortcut).
+
+    Uses the identity ŷ_loocv[i] = y[i] - e[i] / (1 - H_ii), where
+      e[i]  = y[i] - ŷ[i]  (full-data residual, centered)
+      H_ii  = Σ_{k=1}^{npc} U[i,k]² · s_k / (s_k + α)  (hat-matrix diagonal)
+
+    One SVD of S_train → O(N³) total regardless of N or n_perm.
+    Grid over (alpha, npc) costs O(N²) per combo.
+    """
+    n_train = S_train.shape[0]
+    if alphas is None:
+        alphas = np.logspace(-9, 6, 16)
+    if npc_fracs is None:
+        npc_fracs = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+    npcs = np.unique(np.maximum(1, np.round(np.array(npc_fracs) * n_train).astype(int)))
+
+    if fit_intercept:
+        X_off = np.mean(S_train, axis=0, keepdims=True)
+        y_off = float(np.mean(y_train))
+        S_c   = S_train - X_off
+        y_c   = y_train - y_off
+    else:
+        S_c, y_c, y_off = S_train, y_train, 0.0
+
+    try:
+        U, s, Vt = svd(S_c, full_matrices=False)
+    except LinAlgError:
+        U, s, Vt = svd(S_c, full_matrices=False, lapack_driver='gesvd')
+
+    UT_y = U.T @ y_c   # (N,)
+    U2   = U ** 2       # (N, N) — precomputed for H_diag sweep
+
+    score_grid = np.full((len(alphas), len(npcs)), -np.inf)
+
+    for ia, alpha in enumerate(alphas):
+        omd = alpha / (s + alpha)   # α/(s+α), stable; ratio e/denom independent of alpha
+
+        for in_, npc in enumerate(npcs):
+            e     = U[:, :npc] @ (omd[:npc] * UT_y[:npc])
+            denom = U2[:, :npc] @ omd[:npc]
+            y_loocv = y_train - e / np.maximum(denom, np.finfo(float).tiny)
+
+            score_grid[ia, in_] = fold_score(y_train, y_loocv, scoring)
+
+    best_ia, best_in = np.unravel_index(np.argmax(score_grid), score_grid.shape)
+    best_alpha = float(alphas[best_ia])
+    best_npc   = int(npcs[best_in])
+
+    y_hat = _ridge_svd(S_train, S_test, y_train, best_alpha, best_npc, fit_intercept)
+    info  = {"best_params": {"alpha": best_alpha, "npc": best_npc, "npc_frac": best_npc / n_train}}
+    return y_hat, info
+
+
+def pc_ridge_loocv_precomp_outer(S_full, y_full,
+                                  scoring='r2', alphas=None, npc_fracs=None, fit_intercept=True):
+    """
+    IDM_pred-style outer LOOCV using the eigh precomputation trick.
+
+    Precomputes X = V·sqrt(λ) once from eigh(S_full).  Per-fold: leave subject i
+    out, fit ridge on X[mask] via SVD, predict X[i].  Accumulates y_loocv_all
+    over all i, selects best (alpha, npc) globally, returns LOOCV predictions.
+
+    Directly comparable to pc_ridge_loocv_outer (hat-matrix shortcut).
+    O(N⁴) vs O(N³) for the hat-matrix version.
+    """
+    n = S_full.shape[0]
+    if alphas is None:
+        alphas = np.logspace(-9, 6, 16)
+    if npc_fracs is None:
+        npc_fracs = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+    npcs = np.unique(np.maximum(1, np.round(np.array(npc_fracs) * n).astype(int)))
+
+    w, v = eigh(S_full, lower=False)
+    w    = np.maximum(w, 0.0)
+    w    = w[::-1];  v = v[:, ::-1]
+    X_full = v[:, :-1] * np.sqrt(w[:-1])   # (N, N-1)
+
+    y_loocv_all = np.zeros((len(alphas), len(npcs), n))
+
+    for i in range(n):
+        mask   = np.ones(n, bool);  mask[i] = False
+        X_tr   = X_full[mask]       # (N-1, N-1)
+        X_val  = X_full[i:i+1]     # (1,   N-1)
+        y_tr   = y_full[mask]
+
+        if fit_intercept:
+            X_off    = np.mean(X_tr, axis=0, keepdims=True)
+            y_off_i  = float(np.mean(y_tr))
+            X_tr_c   = X_tr  - X_off
+            X_val_c  = X_val - X_off
+            y_tr_c   = y_tr  - y_off_i
+        else:
+            X_tr_c, X_val_c, y_tr_c, y_off_i = X_tr, X_val, y_tr, 0.0
+
+        try:
+            U_f, s_f, Vt_f = svd(X_tr_c, full_matrices=False)
+        except LinAlgError:
+            U_f, s_f, Vt_f = svd(X_tr_c, full_matrices=False, lapack_driver='gesvd')
+
+        UT_y_f = U_f.T @ y_tr_c
+        Xval_V = X_val_c @ Vt_f.T   # (1, N-1)
+
+        for ia, alpha in enumerate(alphas):
+            d_f    = 1.0 / (s_f + alpha)
+            d_UT_y = d_f * UT_y_f
+            for in_, npc in enumerate(npcs):
+                y_loocv_all[ia, in_, i] = float(Xval_V[0, :npc] @ d_UT_y[:npc]) + y_off_i
+
+    score_grid = np.array([
+        [fold_score(y_full, y_loocv_all[ia, in_], scoring)
+         for in_ in range(len(npcs))]
+        for ia in range(len(alphas))
+    ])
+    best_ia, best_in = np.unravel_index(np.argmax(score_grid), score_grid.shape)
+    best_alpha = float(alphas[best_ia])
+    best_npc   = int(npcs[best_in])
+
+    info = {"best_params": {"alpha": best_alpha, "npc": best_npc, "npc_frac": best_npc / n},
+            "loocv_score": float(score_grid[best_ia, best_in])}
+    return y_loocv_all[best_ia, best_in], info
+
+
+def fit_pc_ridge_loocv_precomp(S_train, S_test, y_train,
+                                scoring='r2', alphas=None, npc_fracs=None, fit_intercept=True):
+    """
+    pc_ridge LOOCV using the get_connectivity_PCs precomputation trick (IDM_pred style).
+
+    Precomputes X = V · sqrt(λ) once from eigh(S_train) so that per-fold indexing
+    replaces per-fold eigendecomposition of the (N-1)×(N-1) submatrix.  A per-fold
+    SVD of the (N-1)×(N-1) X_train slice is still required for ridge, so complexity
+    remains O(N⁴) but with ~2× fewer big operations per fold than naive LOOCV.
+
+    For large N_train the wall-clock time is dominated by N × SVD(N-1, N-1).
+    Pass a smaller S_train (subsampled subjects) to estimate timing, then
+    extrapolate with t_full ≈ t_sub × (N_full / N_sub)⁴.
+    """
+    n_train = S_train.shape[0]
+    if alphas is None:
+        alphas = np.logspace(-9, 6, 16)
+    if npc_fracs is None:
+        npc_fracs = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+    npcs = np.unique(np.maximum(1, np.round(np.array(npc_fracs) * n_train).astype(int)))
+
+    # ── precompute X = V·sqrt(λ) from full eigendecomposition (IDM_pred trick) ──
+    w, v = eigh(S_train, lower=False)  # ascending eigenvalues
+    w    = np.maximum(w, 0.0)
+    w    = w[::-1];  v = v[:, ::-1]   # descending
+    X_full = v[:, :-1] * np.sqrt(w[:-1])  # (N, N-1); drops near-zero last eigenvalue
+
+    # Accumulate all LOO predictions; score globally (per-sample R² is undefined)
+    y_loocv_all = np.zeros((len(alphas), len(npcs), n_train))
+
+    for i in range(n_train):
+        mask   = np.ones(n_train, bool); mask[i] = False
+        X_tr   = X_full[mask]      # (N-1, N-1) — no re-eigendecomposition
+        X_val  = X_full[i:i+1]    # (1,   N-1)
+        y_tr   = y_train[mask]
+
+        if fit_intercept:
+            X_off   = np.mean(X_tr, axis=0, keepdims=True)
+            y_off   = float(np.mean(y_tr))
+            X_tr_c  = X_tr  - X_off
+            X_val_c = X_val - X_off
+            y_tr_c  = y_tr  - y_off
+        else:
+            X_tr_c, X_val_c, y_tr_c, y_off = X_tr, X_val, y_tr, 0.0
+
+        try:
+            U_f, s_f, Vt_f = svd(X_tr_c, full_matrices=False)
+        except LinAlgError:
+            U_f, s_f, Vt_f = svd(X_tr_c, full_matrices=False, lapack_driver='gesvd')
+
+        UT_y_f = U_f.T @ y_tr_c
+        Xval_V = X_val_c @ Vt_f.T   # (1, N-1)
+
+        for ia, alpha in enumerate(alphas):
+            d_f    = 1.0 / (s_f + alpha)
+            d_UT_y = d_f * UT_y_f
+            for in_, npc in enumerate(npcs):
+                y_loocv_all[ia, in_, i] = float(Xval_V[0, :npc] @ d_UT_y[:npc]) + y_off
+
+    score_grid = np.array([
+        [fold_score(y_train, y_loocv_all[ia, in_], scoring)
+         for in_ in range(len(npcs))]
+        for ia in range(len(alphas))
+    ])
+    best_ia, best_in = np.unravel_index(np.argmax(score_grid), score_grid.shape)
+    best_alpha = float(alphas[best_ia])
+    best_npc   = int(npcs[best_in])
+
+    y_hat = _ridge_svd(S_train, S_test, y_train, best_alpha, best_npc, fit_intercept)
+    info  = {"best_params": {"alpha": best_alpha, "npc": best_npc, "npc_frac": best_npc / n_train}}
+    return y_hat, info
+
+
 def fit_similarity_model(
     S: np.ndarray,
     y: np.ndarray,
@@ -156,6 +528,7 @@ def fit_similarity_model(
     n_splits: int = 5,
     n_repeats: int = 1,
     random_state: int = 0,
+    eps: float = 1e-5,
     # hyperparameter grids (optional; sensible defaults below)
     alphas: np.ndarray | None = None,          # KRR
     knn_ks: np.ndarray | None = None,          # KNN
@@ -193,6 +566,7 @@ def fit_similarity_model(
         S = S.copy()
         np.fill_diagonal(S, 1.0)
         K = S
+        assert check_PSD(K, eps=eps),f"kernel matrix is not PSD at tolerence level {eps}. "
     else:
         # S is raw feature matrix
         if S.ndim == 1:
@@ -324,7 +698,7 @@ def fit_similarity_model(
                         model.fit(K_train, y_train)
                         y_pred = model.predict(K_val)
 
-                s = fold_score(y_val, y_pred,scoring)
+                s = fold_score(y_val, y_pred, scoring)
                 param_to_scores[key].append(s)
 
         # Pick best param this repeat

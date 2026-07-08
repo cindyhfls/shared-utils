@@ -4,7 +4,6 @@ Renamed from "HBN_utils".
 '''
 import neuroboros as nb
 import os
-from glob import glob
 
 class HBN(nb.datasets.Dataset):
     def __init__(
@@ -62,6 +61,7 @@ class HCD(nb.datasets.Dataset):
             fp_version = self.fp_version
         suffix_li = [
             "desc-confounds_timeseries.npy",
+            "desc-confounds_timeseries.tsv",
         ]
         output = []
         for suffix in suffix_li:
@@ -86,6 +86,7 @@ class HCD(nb.datasets.Dataset):
                 fn = self.renaming["/".join(fn)].split("/")
             o = self.dl_dset.get(fn, on_missing="raise")
             output.append(o)
+        output.append(None)  # no mask-timeseries file for HCD
         return output
 
     def rename_func(self, sid, task, run, suffix=".npy"):

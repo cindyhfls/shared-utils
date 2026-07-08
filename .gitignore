@@ -30,3 +30,4 @@ venv/
 ENV/
 support_files/
 tests/
+surfaces/

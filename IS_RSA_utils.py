@@ -1,3 +1,10 @@
+'''
+April 27, 2026:
+For the implementation of two-sided permutation p-values, we used the scipy definition where it multiplies the smaller of the one-sided p-value,
+but I realized in many packages permutation p-values were implemented with the absolute value sum(abs(self._correlations) >= abs(self.r)) / self.perms,
+which seems to be more principled. I am not going to change it back but just so you are aware.
+https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html
+'''
 import os
 import neuroboros as nb
 import numpy as np
@@ -5,7 +12,6 @@ from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr,pearsonr,rankdata
 from collections import defaultdict
 from joblib import Parallel, delayed
-
 def normalize_to_unit(data):
     datamin = np.min(data)
     datamax = np.max(data)
@@ -64,9 +70,9 @@ def get_IS_RSA_models(data1,data2=None,metric='NN',normalize='',diag_only=False)
     if normalize=='unit': # not recommended because sensitivity to outlier and removes range difference
         return normalize_to_unit(similarity)
     elif normalize=='frobenius': # normalization on the matrix, recommended when using as a precomputed kernel
-        return normalize_fronbenius(similarity)
+        return normalize_frobenius(similarity)
     elif normalize=='zscore': # normalization on the vector, recommended for OLS
-        return normalize_Score(similarity)
+        return normalize_zscore(similarity)
     else:
         return similarity # no normalization is required if using rank based methods
 

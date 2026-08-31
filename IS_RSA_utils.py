@@ -313,9 +313,25 @@ def IS_RSA_variance_partitioning(neural_similarity, bx_similarity, perm=[],
     return results
 
 def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
-                                     groups=None, n_jobs=-1, checkpoint_dir=None):
+                                     groups=None, n_jobs=-1, checkpoint_dir=None,
+                                     test_names=None):
     """
     Freedman-Lane version of IS_RSA_variance_partitioning.
+
+    test_names : optional list restricting which individual kernels get the
+        expensive permutation-null computation (p-upper/lower/twotail for
+        unique_r2 and partial_r). Kernels not in test_names still count as
+        covariates for every other kernel's "reduced model" (still properly
+        controlled for) and still get their observed partial_r/unique_r2
+        stored -- they just skip the per-target lstsq+QR precompute and
+        1000-permutation loop, which is the expensive part. Use this to skip
+        nuisance covariates (e.g. sex, study_site) nobody is testing as a
+        scientific question. None (default) tests every kernel, matching the
+        original behavior. To add a skipped kernel's p-value back later
+        (e.g. a reviewer asks about site), just rerun with that name included
+        in test_names -- observed stats don't need to be recomputed, and if
+        checkpoint_dir is reused, no other kernel's null needs to be redone
+        either.
 
     Instead of permuting X (behavioral similarity), this permutes Y residuals
     after removing all predictors except the target. This gives a tighter null
@@ -372,11 +388,16 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
     # ── precompute quantities for FL null (no lstsq in permutation loop) ──
     def _fl_precompute(keep_idx, target_idx):
         """
-        Returns (Y_hat, residuals, U, Y_hat_c, SS_yhat):
+        Returns (residuals, U, Y_hat_c, SS_yhat, X_target_orth):
           U       : (nvalid, k_target) orthonormal basis for target predictors
                     after projecting out the reduced model — numerator = ||U.T @ R_p||^2
           Y_hat_c : Y_hat - mean(Y_hat), for SS_tot computation
           SS_yhat : ||Y_hat_c||^2 per searchlight
+          X_target_orth : (nvalid, k_target) target predictor(s) residualized
+                    against the reduced model, unnormalized (used for the
+                    partial_r null below — only meaningful when k_target == 1,
+                    since partial correlation isn't defined for a multi-column
+                    group of predictors)
         """
         if len(keep_idx) == 0:
             X_other_c = np.ones((nvalid, 1))
@@ -397,10 +418,24 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
 
         Y_hat_c = Y_hat - Y_hat.mean(axis=0)
         SS_yhat = np.sum(Y_hat_c ** 2, axis=0)
-        return residuals, U, Y_hat_c, SS_yhat
+        return residuals, U, Y_hat_c, SS_yhat, X_target_orth
 
     def _fl_null(keep_idx, target_idx, obs):
-        residuals, U, Y_hat_c, SS_yhat = _fl_precompute(keep_idx, target_idx)
+        """Returns (null_unique_r2, null_partial_r). null_partial_r is None
+        when target_idx has more than one column (groups) since partial
+        correlation isn't defined for a multi-predictor target.
+
+        partial_r_perm = corr(x_col, R_p), where x_col is the FIXED (not
+        permuted) residualized target and R_p is the permuted residual —
+        both are already exactly zero-mean (residuals of a model that
+        includes an intercept), matching the same partial_r definition
+        _compute_metrics_batch uses for the observed statistic, just with
+        R_p in place of the observed resid_y."""
+        residuals, U, Y_hat_c, SS_yhat, X_target_orth = _fl_precompute(keep_idx, target_idx)
+        compute_partial = X_target_orth.shape[1] == 1
+        if compute_partial:
+            x_col  = X_target_orth[:, 0]
+            x_norm = np.sqrt(np.sum(x_col ** 2))
 
         def _worker(pc):
             R_p   = residuals[pc]                              # (nvalid, nsearchlights)
@@ -408,30 +443,53 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
             numer = np.sum((U.T @ R_p) ** 2, axis=0)          # ||U.T R_p||^2
             cross = np.sum(Y_hat_c * R_p_c, axis=0)
             denom = SS_yhat + 2 * cross + np.sum(R_p_c ** 2, axis=0)
-            return np.where(denom > 0, np.maximum(0.0, numer / denom), 0.0)
+            unique_r2_perm = np.where(denom > 0, np.maximum(0.0, numer / denom), 0.0)
 
-        null = Parallel(n_jobs=n_jobs, prefer="threads")(
+            if compute_partial:
+                num_partial   = x_col @ R_p_c
+                denom_partial = x_norm * np.sqrt(np.sum(R_p_c ** 2, axis=0))
+                partial_r_perm = np.where(denom_partial > 0, num_partial / denom_partial, 0.0)
+            else:
+                partial_r_perm = None
+            return unique_r2_perm, partial_r_perm
+
+        out = Parallel(n_jobs=n_jobs, prefer="threads")(
             delayed(_worker)(pc) for pc in perm_condensed_list
         )
-        return np.stack(null)   # (nperm, nsearchlights)
+        null_unique_r2 = np.stack([o[0] for o in out])
+        null_partial_r = np.stack([o[1] for o in out]) if compute_partial else None
+        return null_unique_r2, null_partial_r   # (nperm, nsearchlights) each
 
     # ── individual predictors ──────────────────────────────────────
     for i, name in enumerate(names):
+        if test_names is not None and name not in test_names:
+            continue   # still a covariate for every other kernel's reduced model
+                       # (already baked into X_ranked/other_idx above); just skip
+                       # its own (expensive) permutation null.
         ckpt_file = os.path.join(checkpoint_dir, f'null_{name}.npy') if checkpoint_dir else None
+        ckpt_file_partial = os.path.join(checkpoint_dir, f'null_partial_{name}.npy') if checkpoint_dir else None
         if ckpt_file and os.path.exists(ckpt_file):
             print(f'  [ckpt] loading null for {name}')
             null = np.load(ckpt_file)
+            null_partial = np.load(ckpt_file_partial) if ckpt_file_partial and os.path.exists(ckpt_file_partial) else None
         else:
             other_idx = [j for j in range(len(names)) if j != i]
-            null = _fl_null(other_idx, [i], obs_unique_r2[name])
+            null, null_partial = _fl_null(other_idx, [i], obs_unique_r2[name])
             if ckpt_file:
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 np.save(ckpt_file, null)
+                if null_partial is not None:
+                    np.save(ckpt_file_partial, null_partial)
                 print(f'  [ckpt] saved null for {name}')
         pu, pl, pt = _pvals(obs_unique_r2[name], null)
         results[name]['p-upper-unique_r2']   = pu
         results[name]['p-lower-unique_r2']   = pl
         results[name]['p-twotail-unique_r2'] = pt
+        if null_partial is not None:
+            pu_p, pl_p, pt_p = _pvals(obs_partial_r[name], null_partial)
+            results[name]['p-upper-partial_r']   = pu_p
+            results[name]['p-lower-partial_r']   = pl_p
+            results[name]['p-twotail-partial_r'] = pt_p
 
     # ── groups ────────────────────────────────────────────────────
     for grp_name, grp_members in (groups or {}).items():
@@ -443,7 +501,7 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
         else:
             keep_idx   = [i for i, n in enumerate(names) if n not in grp_members]
             target_idx = [i for i, n in enumerate(names) if n in grp_members]
-            null = _fl_null(keep_idx, target_idx, obs_group_unique_r2[grp_name])
+            null, _ = _fl_null(keep_idx, target_idx, obs_group_unique_r2[grp_name])
             if ckpt_file:
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 np.save(ckpt_file, null)

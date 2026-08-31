@@ -297,24 +297,42 @@ def evaluate_transformation(X_val, Y_val, xfm):
 
 def loo_cv(X, Y, func,voxel_reliability_scores=None):
     """
-    Leave one run out cross-validation
-    X : array (nruns, nT, nV)
-    Y : array to align to (nT,nV)
-    func: the function, ridge or procrustes used to align the data
+    Leave one run out cross-validation. Fits/evaluates func(X, Y) i.e. X -> Y,
+    same order as passed in (so callers control alignment direction).
+    Exactly one of X, Y must be 3D (nruns, nT, nV); that side supplies the runs
+    for the leave-one-out loop, the other side is a fixed 2D (nT,nV) array.
     reliability: reliability [0-1] to be used for weighting
     """
-    nruns = X.shape[0]
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if X.ndim == 3 and Y.ndim == 2:
+        runs_is_X = True
+        runs_arr, fixed = X, Y
+    elif Y.ndim == 3 and X.ndim == 2:
+        runs_is_X = False
+        runs_arr, fixed = Y, X
+    else:
+        raise ValueError(
+            f"Exactly one of X, Y must be 3D (nruns, nT, nV); got X.ndim={X.ndim}, Y.ndim={Y.ndim}"
+        )
+
+    nruns = runs_arr.shape[0]
     mse_train_all = []
     mse_val_all   = []
 
     for i in range(nruns):
-        X_val = X[i]
+        runs_val = runs_arr[i]
         idx = np.arange(nruns) != i
-        X_train = np.mean(X[idx], axis=0)
-        R = reliability_weighting_hyperalignment(X_train, Y, func, voxel_reliability_scores=voxel_reliability_scores,threshold=None)
+        runs_train = np.mean(runs_arr[idx], axis=0)
 
-        mt = evaluate_transformation(X_train, Y, R)
-        mv = evaluate_transformation(X_val, Y, R)
+        if runs_is_X:
+            R = reliability_weighting_hyperalignment(runs_train, fixed, func, voxel_reliability_scores=voxel_reliability_scores,threshold=None)
+            mt = evaluate_transformation(runs_train, fixed, R)
+            mv = evaluate_transformation(runs_val, fixed, R)
+        else:
+            R = reliability_weighting_hyperalignment(fixed, runs_train, func, voxel_reliability_scores=voxel_reliability_scores,threshold=None)
+            mt = evaluate_transformation(fixed, runs_train, R)
+            mv = evaluate_transformation(fixed, runs_val, R)
 
         mse_train_all.append(mt['mse'])
         mse_val_all.append(mv['mse'])

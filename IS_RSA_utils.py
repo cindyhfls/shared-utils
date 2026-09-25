@@ -210,107 +210,107 @@ def _compute_metrics_batch(Y_ranked, X_ranked, names):
 
     return partial_r, unique_r2, total_r2
 
-def IS_RSA_variance_partitioning(neural_similarity, bx_similarity, perm=[],
-                                  groups=None,n_jobs=-1):
-    """
-    groups : dict mapping group name to list of predictor names, e.g.
-             {'age':    ['age-NN', 'age-AnnaK_mean'],
-              'motion': ['meanFD-NN', 'meanFD-AnnaK_mean'],
-              'SRS':    ['SRS_SCI_T-NN', 'SRS_SCI_T-AnnaK_mean']}
-    """
-    names         = list(bx_similarity.keys())
-    nsearchlights = neural_similarity.shape[0]
+# def IS_RSA_variance_partitioning(neural_similarity, bx_similarity, perm=[],
+#                                   groups=None,n_jobs=-1):
+#     """
+#     groups : dict mapping group name to list of predictor names, e.g.
+#              {'age':    ['age-NN', 'age-AnnaK_mean'],
+#               'motion': ['meanFD-NN', 'meanFD-AnnaK_mean'],
+#               'SRS':    ['SRS_SCI_T-NN', 'SRS_SCI_T-AnnaK_mean']}
+#     """
+#     names         = list(bx_similarity.keys())
+#     nsearchlights = neural_similarity.shape[0]
 
-    X_ranked = np.column_stack([
-        rankdata(bx_similarity[k]).astype(float)
-        for k in names
-    ])
-    Y_ranked = rankdata(neural_similarity, axis=1).astype(float).T
+#     X_ranked = np.column_stack([
+#         rankdata(bx_similarity[k]).astype(float)
+#         for k in names
+#     ])
+#     Y_ranked = rankdata(neural_similarity, axis=1).astype(float).T
 
-    # ── helper: group unique R² from a given X matrix ─────────────
-    def _group_unique_r2(X, total_r2):
-        out = {}
-        if groups is None:
-            return out
-        for grp_name, grp_members in groups.items():
-            keep_idx = [i for i, n in enumerate(names) if n not in grp_members]
-            if len(keep_idx) == 0:
-                # all predictors are in this group
-                out[grp_name] = total_r2.copy()
-            else:
-                X_reduced = X[:, keep_idx]
-                out[grp_name] = np.maximum(
-                    0.0, total_r2 - _ols_r2_batch(Y_ranked, X_reduced)
-                )
-        return out
+#     # ── helper: group unique R² from a given X matrix ─────────────
+#     def _group_unique_r2(X, total_r2):
+#         out = {}
+#         if groups is None:
+#             return out
+#         for grp_name, grp_members in groups.items():
+#             keep_idx = [i for i, n in enumerate(names) if n not in grp_members]
+#             if len(keep_idx) == 0:
+#                 # all predictors are in this group
+#                 out[grp_name] = total_r2.copy()
+#             else:
+#                 X_reduced = X[:, keep_idx]
+#                 out[grp_name] = np.maximum(
+#                     0.0, total_r2 - _ols_r2_batch(Y_ranked, X_reduced)
+#                 )
+#         return out
 
-    # ── observed ──────────────────────────────────────────────────
-    obs_partial_r, obs_unique_r2, obs_total_r2 = _compute_metrics_batch(
-        Y_ranked, X_ranked, names
-    )
-    obs_group_unique_r2 = _group_unique_r2(X_ranked, obs_total_r2)
+#     # ── observed ──────────────────────────────────────────────────
+#     obs_partial_r, obs_unique_r2, obs_total_r2 = _compute_metrics_batch(
+#         Y_ranked, X_ranked, names
+#     )
+#     obs_group_unique_r2 = _group_unique_r2(X_ranked, obs_total_r2)
 
-    results = defaultdict(dict)
-    results['full_model']['r2']        = obs_total_r2
-    for name in names:
-        for key, obs in [('partial_r', obs_partial_r[name]),
-                                ('unique_r2', obs_unique_r2[name])]:
+#     results = defaultdict(dict)
+#     results['full_model']['r2']        = obs_total_r2
+#     for name in names:
+#         for key, obs in [('partial_r', obs_partial_r[name]),
+#                                 ('unique_r2', obs_unique_r2[name])]:
 
-            results[name][key]= obs
-    for grp_name in (groups or {}):
-        results[grp_name]['unique_r2']  = obs_group_unique_r2[grp_name]
+#             results[name][key]= obs
+#     for grp_name in (groups or {}):
+#         results[grp_name]['unique_r2']  = obs_group_unique_r2[grp_name]
 
-    # ── permutations ──────────────────────────────────────────────────
-    if perm: # skip if empty
-        nperm         = len(perm)
-        n_subjects    = len(perm[0])
-        perm_condensed_list = [_condensed_perm_idx(n_subjects, p) for p in perm]
+#     # ── permutations ──────────────────────────────────────────────────
+#     if perm: # skip if empty
+#         nperm         = len(perm)
+#         n_subjects    = len(perm[0])
+#         perm_condensed_list = [_condensed_perm_idx(n_subjects, p) for p in perm]
 
-        # ── permutations ──────────────────────────────────────────────
-        def _perm_worker(perm_condensed):
-            X_perm = X_ranked[perm_condensed]
-            partial_r, unique_r2, total_r2 = _compute_metrics_batch(Y_ranked, X_perm, names)
-            grp_unique_r2 = _group_unique_r2(X_perm, total_r2)
-            return partial_r, unique_r2, grp_unique_r2, total_r2
+#         # ── permutations ──────────────────────────────────────────────
+#         def _perm_worker(perm_condensed):
+#             X_perm = X_ranked[perm_condensed]
+#             partial_r, unique_r2, total_r2 = _compute_metrics_batch(Y_ranked, X_perm, names)
+#             grp_unique_r2 = _group_unique_r2(X_perm, total_r2)
+#             return partial_r, unique_r2, grp_unique_r2, total_r2
 
-        perm_results = Parallel(n_jobs=n_jobs, prefer="threads")(
-            delayed(_perm_worker)(pc) for pc in perm_condensed_list
-        )
+#         perm_results = Parallel(n_jobs=n_jobs, prefer="threads")(
+#             delayed(_perm_worker)(pc) for pc in perm_condensed_list
+#         )
 
-        null_partial_r      = {n: np.stack([r[0][n] for r in perm_results]) for n in names}
-        null_unique_r2      = {n: np.stack([r[1][n] for r in perm_results]) for n in names}
-        null_total_r2       = np.stack([r[3] for r in perm_results])
-        null_group_unique_r2 = {}
-        if groups is not None:
-            null_group_unique_r2 = {
-                g: np.stack([r[2][g] for r in perm_results])
-                for g in groups
-            }
+#         null_partial_r      = {n: np.stack([r[0][n] for r in perm_results]) for n in names}
+#         null_unique_r2      = {n: np.stack([r[1][n] for r in perm_results]) for n in names}
+#         null_total_r2       = np.stack([r[3] for r in perm_results])
+#         null_group_unique_r2 = {}
+#         if groups is not None:
+#             null_group_unique_r2 = {
+#                 g: np.stack([r[2][g] for r in perm_results])
+#                 for g in groups
+#             }
 
-        # get p-values from permutations
-        pu, pl, pt = _pvals(obs_total_r2, null_total_r2)
-        results['full_model']['p-upper']   = pu
-        results['full_model']['p-lower']   = pl
-        results['full_model']['p-twotail'] = pt
+#         # get p-values from permutations
+#         pu, pl, pt = _pvals(obs_total_r2, null_total_r2)
+#         results['full_model']['p-upper']   = pu
+#         results['full_model']['p-lower']   = pl
+#         results['full_model']['p-twotail'] = pt
 
-        for name in names:
-            for key, obs, null in [('partial_r', obs_partial_r[name], null_partial_r[name]),
-                                    ('unique_r2', obs_unique_r2[name], null_unique_r2[name])]:
-                pu, pl, pt = _pvals(obs, null)
-                results[name][key]                = obs
-                results[name][f'p-upper-{key}']   = pu
-                results[name][f'p-lower-{key}']   = pl
-                results[name][f'p-twotail-{key}'] = pt
+#         for name in names:
+#             for key, obs, null in [('partial_r', obs_partial_r[name], null_partial_r[name]),
+#                                     ('unique_r2', obs_unique_r2[name], null_unique_r2[name])]:
+#                 pu, pl, pt = _pvals(obs, null)
+#                 results[name][key]                = obs
+#                 results[name][f'p-upper-{key}']   = pu
+#                 results[name][f'p-lower-{key}']   = pl
+#                 results[name][f'p-twotail-{key}'] = pt
 
-        for grp_name in (groups or {}):
-            obs  = obs_group_unique_r2[grp_name]
-            null = null_group_unique_r2[grp_name]
-            pu, pl, pt = _pvals(obs, null)
-            results[grp_name]['p-upper-unique_r2']      = pu
-            results[grp_name]['p-lower-unique_r2']      = pl
-            results[grp_name]['p-twotail-unique_r2']    = pt
+#         for grp_name in (groups or {}):
+#             obs  = obs_group_unique_r2[grp_name]
+#             null = null_group_unique_r2[grp_name]
+#             pu, pl, pt = _pvals(obs, null)
+#             results[grp_name]['p-upper-unique_r2']      = pu
+#             results[grp_name]['p-lower-unique_r2']      = pl
+#             results[grp_name]['p-twotail-unique_r2']    = pt
 
-    return results
+#     return results
 
 def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
                                      groups=None, n_jobs=-1, checkpoint_dir=None,

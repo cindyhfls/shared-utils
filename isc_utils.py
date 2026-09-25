@@ -10,11 +10,25 @@ from scipy.spatial.distance import pdist,squareform,cdist
 
 # I did some tests and it looked like numpy.corrcoef and scipy.pearsonr and neuroboros.pearsonr are consistent with zscoring with ddof=0 (population standard deviation instead of sample standard deviation), which is what we have here
 
-def FisherAvg(r,axis=0,has_nan=False):
-    if has_nan:
-        return np.tanh(np.nanmean(np.atanh(r),axis=axis))
-    else:
-        return np.tanh(np.mean(np.atanh(r),axis=axis))
+def FisherAvg(r, axis=0, has_nan=False, clip=0.999999):
+    """Average correlations in Fisher-z space rather than as raw r.
+
+    r is bounded and its sampling distribution is skewed, so a plain mean is biased toward
+    zero and the bias grows with |r| -- exactly where conditions differ most.
+
+    clip bounds |r| just inside 1 before arctanh. This matters more than it looks: pairwise
+    ISC files carry the i==i diagonal at exactly 1.0, arctanh(1) is +inf, and the mean of
+    anything with a +inf in it is +inf, so tanh() returns exactly 1.0 -- silently discarding
+    every other value in the average rather than raising. Pass clip=None to disable.
+
+    has_nan=False keeps np.mean, so NaNs propagate and a hole in the data is visible; pass
+    True for nanmean. (This was the pre-existing default and is left alone.)
+    """
+    r = np.asarray(r, dtype=float)
+    if clip is not None:
+        r = np.clip(r, -clip, clip)
+    avg = np.nanmean if has_nan else np.mean
+    return np.tanh(avg(np.arctanh(r), axis=axis))
 
 def get_subj_avg_isc(v,has_nan=False):
     """Fisher-averaged ISC of each subject with every other subject, in r units.
@@ -134,6 +148,49 @@ def _pairwise_corrsim_dot_masked(X, valid, dtype=np.float32):
         C = cov / np.sqrt(vx * vx.T)
     iu = np.triu_indices(N, k=1)
     return C[iu].astype(dtype, copy=False)
+
+
+
+def pairwise_corrsim_dot_rdm(rdm, valid, dtype=np.float32):
+    """Pairwise ISC of condensed timepoint-by-timepoint RDMs, over jointly-valid entries.
+
+    rdm   : (N, L) condensed RDMs, L = T(T-1)/2, as returned by rdm_features_all_subjects.
+            Entries involving a censored timepoint are NaN (an all-zero pattern makes
+            pdist(..., 'correlation') return 0/0).
+    valid : (N, T) bool frame mask.
+
+    An RDM entry (t1, t2) is usable for a pair only if BOTH subjects retain BOTH timepoints,
+    so the per-subject valid fraction is roughly f^2, not f -- and because nanstd normalises
+    over each subject's own valid entries, the uncorrected estimate is attenuated by about
+    f_i*f_j rather than sqrt(f_i*f_j). On HBN movieDM FDpt5 that is ~21% low, versus ~6% for
+    the response metrics.
+
+    The jointly-valid COUNT never needs the (N, L) validity matrix: with u = w_i * w_j and
+    S = sum_t u, the number of jointly-valid pairs is (S^2 - S)/2, so one small (N,T)@(T,N)
+    matmul gives every pair's count. The centring sums do need the feature-level validity, so
+    this costs two extra (N, L) matmuls on top of the one the unmasked version already does.
+    """
+    rdm = np.asarray(rdm)
+    N, L = rdm.shape
+    W = valid.astype(dtype)
+    T = W.shape[1]
+    if L != T * (T - 1) // 2:
+        raise ValueError(f"rdm has {L} features, expected {T*(T-1)//2} for T={T}")
+
+    iu = np.triu_indices(T, k=1)
+    V = (W[:, iu[0]] * W[:, iu[1]]).astype(dtype)   # (N, L) feature-level validity
+    A = np.nan_to_num(rdm).astype(dtype, copy=False) * V
+
+    S = W @ W.T                                     # (N,N) jointly retained frames
+    n = (S * S - S) / 2.0                           # (N,N) jointly valid RDM entries
+    Sxy = A @ A.T
+    Sx = A @ V.T                                    # sum of rdm_i over jointly-valid entries
+    Sxx = (A * A) @ V.T
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = Sxy - Sx * Sx.T / n
+        vx = Sxx - Sx * Sx / n
+        C = cov / np.sqrt(vx * vx.T)
+    return C[np.triu_indices(N, k=1)].astype(dtype, copy=False)
 
 
 def pairwise_corrsim_dot_xy(X, Y, dtype=np.float32, has_nan=False, nan=None):
@@ -410,6 +467,128 @@ def loo_corrsim_dot_xy(X,Y,dtype=np.float32):
     # correlation
     r = np.sum(Fx * Fy_loo, axis=1) / Fx.shape[1]
     return r.astype(dtype, copy=False)
+
+# ---------------------------------------------------------------------------
+# Voxelwise (column-wise) ISC.
+#
+# Used by subcortical_hyperalignment/05_optimized_isc_pairwise.py,
+# 06_optimized_isc_loo.py, and 37_optimized_isc_projtosubj.py; these helpers are
+# not called by HBN/. Plan: retire them in favor of neuroboros.isc and thin
+# adapters, since their functionality mostly overlaps with Neuroboros.
+# Before migrating, explicitly resolve pre-LOO subject standardization,
+# constant-vertex handling (0 vs NaN), and cross-matrix/output-shape differences.
+#
+# pairwise_corrsim_dot_xy / loo_corrsim_dot_xy flatten (A, B) into one long vector and
+# return a single SPATIOTEMPORAL correlation for the region. The two functions below
+# instead correlate along axis A separately for each column b and Fisher-average the B
+# resulting correlations -- i.e. "the ordinary per-voxel ISC, averaged over the voxels of
+# the region" (todo/20260902.md item 3). The two statistics answer different questions:
+# the spatiotemporal one is sensitive to the region's spatial pattern, the voxelwise one
+# is not (it cannot see whether voxels are in the right place relative to each other, only
+# whether each voxel's own timecourse matches).
+#
+# The same pair of functions covers both domains, because "axis A" is whatever the
+# features are indexed by:
+#   response     A = timepoints,            B = voxels      -> voxelwise temporal ISC
+#   connectivity A = connectivity targets,  B = seed voxels -> per-voxel connectivity-
+#                                                              fingerprint ISC
+# For connectivity this requires the UNFLATTENED (N, nTargets, nSeeds) features, i.e.
+# conn_features_all_subjects(..., flatten=False).
+# ---------------------------------------------------------------------------
+
+def _zscore_axis1(X, dtype):
+    """z-score along axis 1 (the feature axis being correlated over), per (subject, column)."""
+    F = np.asarray(X).astype(dtype, copy=True)
+    F -= F.mean(axis=1, keepdims=True)
+    std = F.std(axis=1, keepdims=True)
+    std[std == 0] = 1.0
+    F /= std
+    return F
+
+
+def voxelwise_corrsim_dot_xy(X, Y, dtype=np.float32, average=True):
+    """
+    X: (N, A, B)
+    Y: (M, A, B)
+    Returns
+    -------
+    C : (N, M) if average else (N, M, B)
+        C[i, j] = Fisher-average over b of corr(X[i, :, b], Y[j, :, b]).
+    """
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if X.ndim != 3 or Y.ndim != 3:
+        raise ValueError(f"Expected (N,A,B) and (M,A,B); got {X.shape} and {Y.shape}.")
+    if X.shape[1:] != Y.shape[1:]:
+        raise ValueError(f"Feature mismatch: {X.shape[1:]} vs {Y.shape[1:]}.")
+
+    Fx = _zscore_axis1(X, dtype)
+    Fy = _zscore_axis1(Y, dtype)
+    A = Fx.shape[1]
+    C = np.einsum('nab,mab->nmb', Fx, Fy, optimize=True) / A  # (N, M, B)
+    if not average:
+        return C.astype(dtype, copy=False)
+    return FisherAvg(C, axis=-1).astype(dtype, copy=False)
+
+
+def loo_voxelwise_corrsim_dot_xy(X, Y, dtype=np.float32, average=True):
+    """
+    Leave-one-out counterpart of voxelwise_corrsim_dot_xy, matching loo_corrsim_dot_xy's
+    convention: each row of X against the mean of all OTHER rows of Y.
+
+    X, Y: (N, A, B)
+    Returns
+    -------
+    r : (N,) if average else (N, B)
+    """
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if X.ndim != 3 or Y.ndim != 3:
+        raise ValueError(f"Expected (N,A,B); got {X.shape} and {Y.shape}.")
+    if X.shape != Y.shape:
+        raise ValueError(f"X and Y do not have the same shape: {X.shape} vs {Y.shape}.")
+
+    N, A, B = X.shape
+    Fx = _zscore_axis1(X, dtype)
+    Fy = _zscore_axis1(Y, dtype)
+
+    Fy_loo = (Fy.sum(axis=0, keepdims=True) - Fy) / (N - 1)  # (N, A, B)
+    Fy_loo = _zscore_axis1(Fy_loo, dtype)                    # re-z-score, as loo_corrsim_dot_xy does
+
+    r = np.sum(Fx * Fy_loo, axis=1) / A  # (N, B)
+    if not average:
+        return r.astype(dtype, copy=False)
+    return FisherAvg(r, axis=-1).astype(dtype, copy=False)
+
+
+def loo_voxelwise_corrsim_dot(X, dtype=np.float32, average=True):
+    """Within-X leave-one-out counterpart of loo_corrsim_dot, voxelwise.
+
+    X : (N, A, B)   e.g. (subjects, timepoints, voxels) for response, or
+                    (subjects, connectivity targets, seed voxels) for connectivity
+    Returns (N,) -- each subject against the mean of all the others, correlated along axis A
+    separately per column of B and Fisher-averaged across B. This is what 06_optimized_isc_loo.py
+    needs; loo_voxelwise_corrsim_dot_xy is the two-array form 37_ uses.
+    """
+    return loo_voxelwise_corrsim_dot_xy(X, X, dtype=dtype, average=average)
+
+
+def pairwise_voxelwise_corrsim_dot(X, dtype=np.float32):
+    """Within-X pairwise counterpart of pairwise_corrsim_dot, voxelwise.
+
+    X : (N, A, B)
+    Returns the condensed upper triangle, length N*(N-1)/2, in the same order
+    scipy.spatial.distance.squareform uses -- so it drops straight into the memmaps
+    05_optimized_isc_pairwise.py already writes.
+    """
+    # Select the pairs FIRST, then Fisher-average across voxels. Averaging first would run
+    # arctanh over the i==i diagonal, where every per-voxel correlation is exactly 1, so
+    # arctanh(1)=inf -- harmless once the diagonal is discarded, but it fills the logs with
+    # divide-by-zero warnings. Same numbers either way, verified.
+    C = voxelwise_corrsim_dot_xy(X, X, dtype=dtype, average=False)   # (N, N, B)
+    iu = np.triu_indices(C.shape[0], k=1)
+    return FisherAvg(C[iu], axis=-1).astype(dtype, copy=False)       # (nPairs,)
+
 
 def psf_corrsim(X,dist,roi,voxel_pairs):
     all_r = np.empty(X.shape[0])

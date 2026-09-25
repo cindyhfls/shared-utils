@@ -16,6 +16,25 @@ def FisherAvg(r,axis=0,has_nan=False):
     else:
         return np.tanh(np.mean(np.atanh(r),axis=axis))
 
+def get_subj_avg_isc(v,has_nan=False):
+    """Fisher-averaged ISC of each subject with every other subject, in r units.
+
+    v : (nSL, nPairs) condensed pairwise ISC, as returned by load_isc(reduce=None).
+    Averages over searchlights first (Fisher), then over each subject's pairs, and
+    inverse-transforms the final mean with tanh, returning correlations in r.
+    Call np.arctanh(result) if downstream analysis needs Fisher-z units.
+
+    This replaces the previous z-valued return; callers must not tanh again.
+    The existing averaging and has_nan behavior are otherwise unchanged.
+    """
+    d = squareform(FisherAvg(v,axis=0,has_nan=has_nan))
+    if has_nan:
+        finite = np.sum(~np.isnan(d),axis=0)
+        s = np.nansum(np.atanh(d),axis=0)/finite
+    else:
+        s = np.sum(np.atanh(d),axis=0)/(d.shape[0]-1)
+    return np.tanh(s)
+
 def pairwise_corrsim_dot(X, dtype=np.float32,skip_zscore=False, has_nan=False, valid=None):
     """Condensed pairwise Pearson correlation between the rows of X.
 

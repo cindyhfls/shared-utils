@@ -315,39 +315,36 @@ def IS_RSA_variance_partitioning(neural_similarity, bx_similarity, perm=[],
 def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
                                      groups=None, n_jobs=-1, checkpoint_dir=None,
                                      test_names=None):
-    """
-    Freedman-Lane version of IS_RSA_variance_partitioning.
+    """Rank-based variance partitioning with Freedman-Lane residual permutations.
 
-    test_names : optional list restricting which individual kernels get the
-        expensive permutation-null computation (p-upper/lower/twotail for
-        unique_r2 and partial_r). Kernels not in test_names still count as
-        covariates for every other kernel's "reduced model" (still properly
-        controlled for) and still get their observed partial_r/unique_r2
-        stored -- they just skip the per-target lstsq+QR precompute and
-        1000-permutation loop, which is the expensive part. Use this to skip
-        nuisance covariates (e.g. sex, study_site) nobody is testing as a
-        scientific question. None (default) tests every kernel, matching the
-        original behavior. To add a skipped kernel's p-value back later
-        (e.g. a reviewer asks about site), just rerun with that name included
-        in test_names -- observed stats don't need to be recomputed, and if
-        checkpoint_dir is reused, no other kernel's null needs to be redone
-        either.
+    Observed statistics: full-model R², unique R² for each kernel/group, and
+    partial r for individual kernels (both target and outcome residualized
+    against the other kernels and an intercept).
 
-    Instead of permuting X (behavioral similarity), this permutes Y residuals
-    after removing all predictors except the target. This gives a tighter null
-    distribution for group tests when predictors are orthogonal, because the
-    null only captures variance unexplained by other predictors.
+    test_names restricts individual-kernel permutation tests, not covariates
+    or observed statistics. None tests every kernel. Group tests are separate
+    and are not restricted by test_names. The number of draws is len(perm).
+    Subject permutations are supplied by the caller; this function converts
+    them to condensed-pair indices and does not impose family restrictions.
 
-    Efficiency: all lstsq calls are precomputed once per target. The permutation
-    loop uses only matrix multiplications via a precomputed orthonormal basis U
-    for the target predictors:
-        unique_R2_perm = ||U.T @ R_p||^2 / SS_tot(Y_hat + R_p)
-    where R_p = residuals[perm_condensed].
+    For each target, the reduced model contains all other kernels plus an
+    intercept. Its outcome residuals are permuted to form Y_perm = Y_hat + R_p.
+    Precomputed residualized target basis U gives
+        unique_R2_perm = ||U.T @ R_p||² / SS_tot(Y_hat + R_p).
+    Individual kernels also get a partial-r null. Currently this correlates
+    the residualized target with R_p without projecting R_p out of the reduced
+    model again. This differs from refitting partial r on Y_perm; the known
+    denominator limitation has not yet been corrected.
 
-    Trade-off: O(n_targets x n_perm) passes vs O(n_perm) for the original, but
-    each pass is much cheaper (no lstsq per permutation).
+    Returned permutation p-values are raw upper/lower tail fractions and
+    twice the smaller tail (capped at 1). No +1 correction or FDR is applied
+    here. Individual kernels receive unique_r2 and partial_r p-values; groups
+    receive unique_r2 p-values only. No p-values are computed when perm is empty.
 
-    Note: partial_r p-values are not computed (unique_r2 only).
+    Checkpoints reuse saved null arrays without validating inputs/permutations.
+    If a unique-R² checkpoint exists but its partial-r checkpoint is missing,
+    that kernel's partial-r p-values are omitted rather than regenerated.
+    Use a fresh checkpoint directory when the data, model, or permutations change.
     """
     names    = list(bx_similarity.keys())
     X_ranked = np.column_stack([
@@ -425,12 +422,11 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
         when target_idx has more than one column (groups) since partial
         correlation isn't defined for a multi-predictor target.
 
-        partial_r_perm = corr(x_col, R_p), where x_col is the FIXED (not
-        permuted) residualized target and R_p is the permuted residual —
-        both are already exactly zero-mean (residuals of a model that
-        includes an intercept), matching the same partial_r definition
-        _compute_metrics_batch uses for the observed statistic, just with
-        R_p in place of the observed resid_y."""
+        Currently partial_r_perm = corr(x_col, R_p), with a fixed residualized
+        target x_col. R_p is centered but not re-residualized against the
+        reduced model. Permuting residuals need not preserve orthogonality to
+        nuisance predictors, so this is not the same as refitting partial r
+        on Y_hat + R_p (known denominator limitation)."""
         residuals, U, Y_hat_c, SS_yhat, X_target_orth = _fl_precompute(keep_idx, target_idx)
         compute_partial = X_target_orth.shape[1] == 1
         if compute_partial:

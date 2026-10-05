@@ -181,7 +181,7 @@ def _ridge_svd(X_train, X_test, y_train, alpha, npc, fit_intercept=True):
         U, s, Vt = svd(X_train, full_matrices=False, lapack_driver='gesvd')
     X_test_V = X_test @ Vt.T[:, :npc]
     UT_y     = U.T[:npc] @ y_train
-    d        = 1.0 / (s[:npc] + alpha)
+    d        = s[:npc] / (s[:npc]**2 + alpha)
     yhat     = X_test_V @ (d * UT_y)
     if fit_intercept:
         yhat += y_offset
@@ -191,6 +191,11 @@ def _ridge_svd(X_train, X_test, y_train, alpha, npc, fit_intercept=True):
 def fit_pc_ridge(S_train, S_test, y_train, fold_labels_train,
                  scoring='r2', alphas=None, npc_fracs=None, fit_intercept=True):
     """
+    RETIRED: this is ridge on the similarity rows themselves, not IDM-style
+    PC ridge.  It is not equivalent to precomputed KRR or to predict_g.py's
+    eigendecomposition-based PC features.  Keep only for historical code;
+    use fit_similarity_model(..., method='krr') for kernel ridge instead.
+
     Inner-CV grid search over (alpha, npc) then predict on S_test.
 
     S_train          : (n_train, n_train)  — similarity matrix used as feature matrix
@@ -236,7 +241,7 @@ def fit_pc_ridge(S_train, S_test, y_train, fold_labels_train,
         Xval_V = Xval_c @ Vt.T       # (n_val, k)
 
         for ia, alpha in enumerate(alphas):
-            d      = 1.0 / (s + alpha)      # (k,) — KRR-equivalent weights
+            d      = s / (s**2 + alpha)     # (k,) — standard ridge weights
             d_UT_y = d * UT_y               # (k,)
             for in_, npc in enumerate(npcs):
                 yhat  = Xval_V[:, :npc] @ d_UT_y[:npc] + y_off
@@ -250,6 +255,86 @@ def fit_pc_ridge(S_train, S_test, y_train, fold_labels_train,
     y_hat = _ridge_svd(S_train, S_test, y_train, best_alpha, best_npc, fit_intercept)
     info  = {"best_params": {"alpha": best_alpha, "npc": best_npc,
                               "npc_frac": best_npc / n_train}}
+    return y_hat, info
+
+
+def make_family_groups(family_ids):
+    """Return local index arrays for leave-one-family-out CV.
+
+    Missing family IDs are treated as singleton families.
+    """
+    family_ids = np.asarray(family_ids, dtype=object)
+    groups = []
+    seen = set()
+    for i, family_id in enumerate(family_ids):
+        if pd.isna(family_id):
+            groups.append(np.array([i], dtype=int))
+        elif family_id not in seen:
+            seen.add(family_id)
+            groups.append(np.where(family_ids == family_id)[0].astype(int))
+    return groups
+
+
+def fit_krr_family_hat(S_train, S_test, y_train, family_groups,
+                       scoring='r2', alphas=None):
+    """Tune precomputed KRR by block leave-one-family-out hat-matrix CV.
+
+    This is exact for the fixed-kernel, no-intercept KRR model used by
+    ``KernelRidge(kernel='precomputed')``.  It is intended for hyperparameter
+    selection inside an outer training set; ``S_test`` is never used during
+    tuning.  The returned prediction is a refit on all of ``S_train``.
+    """
+    S_train = np.asarray(S_train, dtype=np.float64)
+    S_test = np.asarray(S_test, dtype=np.float64)
+    y_train = np.asarray(y_train, dtype=np.float64).ravel()
+    if alphas is None:
+        alphas = np.logspace(-9, 3, 13)
+    if S_train.ndim != 2 or S_train.shape[0] != S_train.shape[1]:
+        raise ValueError("S_train must be square for precomputed KRR.")
+    if S_test.ndim != 2 or S_test.shape[1] != S_train.shape[0]:
+        raise ValueError("S_test must have one column per training subject.")
+    if len(y_train) != S_train.shape[0]:
+        raise ValueError("y_train must match S_train.")
+    if not family_groups:
+        raise ValueError("family_groups must contain at least one group.")
+
+    # KRR uses (K + alpha I)^-1.  The eigendecomposition makes the full
+    # smoother H_alpha = K(K + alpha I)^-1 cheap to evaluate for each alpha.
+    S_train = 0.5 * (S_train + S_train.T)
+    eigenvalues, eigenvectors = eigh(S_train, lower=False)
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+    qTy = eigenvectors.T @ y_train
+
+    best_score = -np.inf
+    best_alpha = None
+    for alpha in np.asarray(alphas, dtype=float):
+        h_eigenvalues = eigenvalues / (eigenvalues + alpha)
+        y_fit = eigenvectors @ (h_eigenvalues * qTy)
+        residual = y_train - y_fit
+        y_hat_family = np.full_like(y_train, np.nan)
+
+        for family in family_groups:
+            family = np.asarray(family, dtype=int)
+            Q_family = eigenvectors[family, :]
+            H_ff = (Q_family * h_eigenvalues) @ Q_family.T
+            correction = np.linalg.solve(
+                np.eye(len(family)) - H_ff,
+                residual[family],
+            )
+            y_hat_family[family] = y_train[family] - correction
+
+        score = fold_score(y_train, y_hat_family, scoring)
+        if score > best_score:
+            best_score = score
+            best_alpha = float(alpha)
+
+    # Refit on all outer-training subjects and predict the untouched outer test.
+    coefficients = eigenvectors @ (qTy / (eigenvalues + best_alpha))
+    y_hat = S_test @ coefficients
+    info = {
+        "best_params": {"alpha": best_alpha},
+        "inner_loofamily_score": float(best_score),
+    }
     return y_hat, info
 
 
@@ -296,9 +381,9 @@ def pc_ridge_loocv_outer(S_full, y_full,
     best_y_loocv = np.full(n, np.nan)
 
     for alpha in alphas:
-        # omd = α/(s+α).  Both e and denom scale as alpha, so their ratio is
+        # omd = α/(s²+α).  Both e and denom scale as alpha, so their ratio is
         # well-conditioned for all alpha > 0 — no threshold or fallback needed.
-        omd = alpha / (s + alpha)
+        omd = alpha / (s**2 + alpha)
         for npc in npcs:
             e     = U[:, :npc] @ (omd[:npc] * UT_y[:npc])   # (I−H)y_c, stable
             denom = U2[:, :npc] @ omd[:npc]                   # 1−H_diag, always > 0 for alpha > 0
@@ -325,10 +410,33 @@ def fit_pc_ridge_loocv_hat(S_train, S_test, y_train,
 
     Uses the identity ŷ_loocv[i] = y[i] - e[i] / (1 - H_ii), where
       e[i]  = y[i] - ŷ[i]  (full-data residual, centered)
-      H_ii  = Σ_{k=1}^{npc} U[i,k]² · s_k / (s_k + α)  (hat-matrix diagonal)
+      H_ii  = Σ_{k=1}^{npc} U[i,k]² · s_k² / (s_k² + α)  (hat-matrix diagonal)
 
-    One SVD of S_train → O(N³) total regardless of N or n_perm.
-    Grid over (alpha, npc) costs O(N²) per combo.
+    One SVD of S_train is reused during tuning; the final _ridge_svd call
+    performs another decomposition. Grid cost is O(N²) per (alpha, npc).
+
+    CAUTION: this implementation has not been validated against explicit
+    leave-one-out refits of the intended model. Known concerns to check:
+    - With truncated components, e below includes only shrinkage residuals
+      within the retained subspace, omitting target variation outside it.
+      Likewise, the retained-component denominator is not generally 1-H_ii.
+      Intercept leverage must also be accounted for when fit_intercept=True;
+      the H_ii expression above describes only the component contribution.
+    - The component basis is estimated once from all supplied training
+      subjects. Truncating this fixed basis is not equivalent to recomputing
+      the basis after excluding each inner-validation subject. An exact
+      fixed-kernel ridge LOOCV shortcut is not inherently leaky, but that
+      equivalence has not been established for this implementation.
+    - If y_train was first adjusted for age/sex/motion using all supplied
+      training subjects, inner-validation targets contributed to that fit.
+      This helper does not refit that questionnaire-score adjustment within
+      inner folds (this is unrelated to fMRI time-series denoising).
+    These issues can change tuning scores and selected hyperparameters; the
+    direction of any performance change is not established. They do not by
+    themselves expose outer-test targets, provided all fitting stays within
+    outer training. Validate predictions against explicit refits, including
+    truncation, intercept, and covariate handling, before relying on this
+    helper. It implements individual LOO, not leave-one-family-out.
     """
     n_train = S_train.shape[0]
     if alphas is None:
@@ -356,7 +464,7 @@ def fit_pc_ridge_loocv_hat(S_train, S_test, y_train,
     score_grid = np.full((len(alphas), len(npcs)), -np.inf)
 
     for ia, alpha in enumerate(alphas):
-        omd = alpha / (s + alpha)   # α/(s+α), stable; ratio e/denom independent of alpha
+        omd = alpha / (s**2 + alpha)  # α/(s²+α), stable; ratio e/denom independent of alpha
 
         for in_, npc in enumerate(npcs):
             e     = U[:, :npc] @ (omd[:npc] * UT_y[:npc])

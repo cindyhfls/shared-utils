@@ -283,6 +283,25 @@ def fit_krr_family_hat(S_train, S_test, y_train, family_groups,
     ``KernelRidge(kernel='precomputed')``.  It is intended for hyperparameter
     selection inside an outer training set; ``S_test`` is never used during
     tuning.  The returned prediction is a refit on all of ``S_train``.
+
+    Similarity matrices such as pairwise ISC are not guaranteed to be positive
+    semidefinite.  Instead of clipping negative eigenvalues (which changes the
+    training kernel but not the raw ``S_test`` rows), the training kernel is
+    shifted on its diagonal: K' = S_train + c I with c = max(0, -lambda_min).
+    K' is PSD, every leave-family-out sub-kernel of it is PSD (eigenvalue
+    interlacing), and the shift leaves all between-subject entries unchanged.
+    ``alphas`` is the ridge penalty on K'; the effective penalty on S_train is
+    c + alpha.  When S_train is PSD, c = 0 and nothing changes.
+
+    WARNING: the shift does NOT make alpha selection safe for non-PSD
+    similarities.  The hat-matrix LOFO shortcut only sees S_train, whose rows
+    are consistent with K', but real test rows need not be: with scrubbed
+    pairwise ISC, train+test lambda_min was ~10x more negative than train-only
+    (HBN/scratch_analysis/2026-10-05_krr_alpha_selection_check/).  Test rows then
+    load on K''s near-null directions, which tiny alphas amplify by ~1/alpha,
+    and the shortcut cannot detect it.  For such similarities choose alpha by
+    refit-based CV that scores held-out subjects from raw rows (e.g.
+    fit_similarity_model with fold labels).
     """
     S_train = np.asarray(S_train, dtype=np.float64)
     S_test = np.asarray(S_test, dtype=np.float64)
@@ -302,7 +321,9 @@ def fit_krr_family_hat(S_train, S_test, y_train, family_groups,
     # smoother H_alpha = K(K + alpha I)^-1 cheap to evaluate for each alpha.
     S_train = 0.5 * (S_train + S_train.T)
     eigenvalues, eigenvectors = eigh(S_train, lower=False)
-    eigenvalues = np.maximum(eigenvalues, 0.0)
+    min_eigenvalue = float(eigenvalues[0])  # eigh returns ascending eigenvalues
+    diagonal_shift = max(0.0, -min_eigenvalue)
+    eigenvalues = eigenvalues + diagonal_shift  # eigenvalues of S_train + c I (all >= 0)
     qTy = eigenvectors.T @ y_train
 
     best_score = -np.inf
@@ -334,6 +355,8 @@ def fit_krr_family_hat(S_train, S_test, y_train, family_groups,
     info = {
         "best_params": {"alpha": best_alpha},
         "inner_loofamily_score": float(best_score),
+        "min_eigenvalue": min_eigenvalue,
+        "diagonal_shift": diagonal_shift,
     }
     return y_hat, info
 

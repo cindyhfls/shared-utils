@@ -659,7 +659,7 @@ def fit_similarity_model(
     n_splits: int = 5,
     n_repeats: int = 1,
     random_state: int = 0,
-    eps: float = 1e-5,
+    eps: float = 1e-5,  # unused since the PSD assertion was replaced by a diagonal shift; kept for old callers
     # hyperparameter grids (optional; sensible defaults below)
     alphas: np.ndarray | None = None,          # KRR
     knn_ks: np.ndarray | None = None,          # KNN
@@ -670,7 +670,14 @@ def fit_similarity_model(
     Fit a regression model using either a precomputed N×N similarity matrix or raw features.
 
     precomputed=True (default):
-      S is an N×N similarity matrix (must be PSD for krr/svr).
+      S is an N×N similarity matrix. For krr/svr it need not be PSD: if its smallest
+      eigenvalue is negative (e.g. scrubbed pairwise ISC), the diagonal is shifted,
+      K = S + cI with c = max(0, -lambda_min), so every inner and final training kernel
+      is PSD (eigenvalue interlacing). Between-subject entries, and hence the raw rows
+      used to predict held-out or test subjects, are unchanged. Hyperparameters are
+      chosen by refitting and scoring held-out folds from those raw rows, which (unlike
+      fit_krr_family_hat's hat-matrix shortcut) also catches test rows that are
+      inconsistent with the training kernel. c is reported in info["diagonal_shift"].
       - "krr": KernelRidge(alpha=..., kernel="precomputed")
       - "svr": SVR(C=..., epsilon=..., kernel="precomputed")
       - "knn": KNeighborsRegressor(n_neighbors=..., metric="precomputed") on D = 1 - K
@@ -697,7 +704,12 @@ def fit_similarity_model(
         S = S.copy()
         np.fill_diagonal(S, 1.0)
         K = S
-        assert check_PSD(K, eps=eps),f"kernel matrix is not PSD at tolerence level {eps}. "
+        if method in ("krr", "svr"):
+            min_eigenvalue = float(np.linalg.eigvalsh(K)[0])
+            diagonal_shift = max(0.0, -min_eigenvalue)
+            K[np.diag_indices_from(K)] += diagonal_shift
+        else:  # knn uses D = 1 - K and needs no PSD kernel
+            min_eigenvalue, diagonal_shift = np.nan, 0.0
     else:
         # S is raw feature matrix
         if S.ndim == 1:
@@ -890,6 +902,8 @@ def fit_similarity_model(
         "precomputed": precomputed,
         "kernel": kernel if not precomputed else "precomputed",
         "scoring": scoring,
+        "min_eigenvalue": min_eigenvalue if precomputed else np.nan,
+        "diagonal_shift": diagonal_shift if precomputed else 0.0,
         "svr_epsilons": np.asarray(svr_epsilons, dtype=float),
         "n_splits": n_splits,
         "n_repeats": n_repeats,

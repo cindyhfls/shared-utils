@@ -632,7 +632,7 @@ def fit_similarity_model(
     precomputed: bool = True,
     kernel: str = "rbf",               # used only when precomputed=False
     gammas: np.ndarray | None = None,  # used only when precomputed=False and kernel='rbf'
-    scoring: Literal["corr", "r2","mse"] = "corr",
+    scoring: Literal["corr", "r2","mse"] = "r2",  # r2 (== MSE ranking); corr ignores prediction scale
     n_splits: int = 5,
     n_repeats: int = 1,
     random_state: int = 0,
@@ -641,7 +641,7 @@ def fit_similarity_model(
     alphas: np.ndarray | None = None,          # KRR
     knn_ks: np.ndarray | None = None,          # KNN
     svr_Cs: np.ndarray | None = None,          # SVR
-    svr_epsilons: np.ndarray | None = None,    # SVR
+    svr_epsilons: np.ndarray | None = None,    # SVR, absolute outcome units; default scales with SD(y)
 ) -> tuple[Any, dict]:
     """
     Fit a regression model using either a precomputed N×N similarity matrix or raw features.
@@ -698,8 +698,11 @@ def fit_similarity_model(
         svr_Cs = np.logspace(-3, 3, 13)
         # svr_Cs = np.logspace(-2, 3, 10)
     if svr_epsilons is None:
-        svr_epsilons = np.array([1e-3, 1e-2, 1e-1, 0.2, 0.5, 1.0, 10, 100, 1000], dtype=float)
-        # svr_epsilons = np.array([1e-3, 1e-2, 1e-1, 0.2, 0.5, 1.0], dtype=float)
+        # epsilon is in outcome units, so scale the default grid by SD of the training outcome:
+        # the old absolute grid [1e-3 ... 1, 10, 100, 1000] was meaningless above ~SD (e.g. age in
+        # years, SRS residual SD ~10) and wasted a third of the SVR fits. The fractions below are
+        # a judgment call, not validated.
+        svr_epsilons = np.array([0.0, 0.1, 0.25, 0.5, 1.0]) * float(np.std(y))
 
     rng = np.random.RandomState(random_state)
 
@@ -864,6 +867,7 @@ def fit_similarity_model(
         "precomputed": precomputed,
         "kernel": kernel if not precomputed else "precomputed",
         "scoring": scoring,
+        "svr_epsilons": np.asarray(svr_epsilons, dtype=float),
         "n_splits": n_splits,
         "n_repeats": n_repeats,
         "best_params": best_params_final,

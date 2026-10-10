@@ -647,6 +647,17 @@ def fit_pc_ridge_loocv_precomp(S_train, S_test, y_train,
     return y_hat, info
 
 
+class NullKernelModel:
+    """The "no kernel" choice of fit_similarity_model(allow_null=True): predicts exactly 0."""
+
+    def __init__(self, n_train):
+        self.alpha = np.inf
+        self.dual_coef_ = np.zeros(n_train)
+
+    def predict(self, X):
+        return np.zeros(np.asarray(X).shape[0])
+
+
 def fit_similarity_model(
     S: np.ndarray,
     y: np.ndarray,
@@ -665,6 +676,8 @@ def fit_similarity_model(
     knn_ks: np.ndarray | None = None,          # KNN
     svr_Cs: np.ndarray | None = None,          # SVR
     svr_epsilons: np.ndarray | None = None,    # SVR, absolute outcome units; default scales with SD(y)
+    alpha_scale: Literal["absolute", "trace"] = "absolute",  # KRR: "trace" multiplies alphas by trace(K)/N
+    allow_null: bool = False,  # KRR: also offer alpha = inf ("no kernel", predicts 0) to the inner CV
 ) -> tuple[Any, dict]:
     """
     Fit a regression model using either a precomputed N×N similarity matrix or raw features.
@@ -688,6 +701,17 @@ def fit_similarity_model(
       - "krr": KernelRidge(alpha=..., kernel=kernel, gamma=gamma)
       - "svr": SVR(C=..., epsilon=..., kernel=kernel, gamma=gamma)
       - "knn": KNeighborsRegressor(n_neighbors=..., metric='euclidean')
+
+    KRR options (both off by default, so existing callers are unchanged):
+      alpha_scale="trace": the alphas are relative to the training kernel's mean eigenvalue,
+        trace(K)/N (for a raw feature matrix, the linear kernel's: mean squared row norm), so one
+        grid means the same shrinkage for kernels of different scale. For unit-diagonal similarity
+        kernels this is 1 + diagonal shift. info["alpha_scale_value"] holds the multiplier.
+      allow_null=True: alpha = inf competes in the same inner CV, scored as predicting 0 for every
+        held-out subject. If it wins, the final model predicts exactly 0 (dual_coef_ = 0): with a
+        residualised outcome, exactly the covariates-only prediction. Without it, a kernel the CV
+        wants switched off is only shrunk to ~1e-9, and two such models differ by tiny but
+        consistently signed amounts that a paired test can call significant.
 
     Returns:
       final_model: refit on full data with chosen hyperparams
@@ -726,6 +750,19 @@ def fit_similarity_model(
     # Defaults for hyperparameter grids
     if alphas is None:
         alphas = np.logspace(-9, 3, 13)
+    alpha_scale_value = 1.0
+    if method == "krr" and alpha_scale == "trace":
+        if precomputed:
+            alpha_scale_value = float(np.trace(K)) / K.shape[0]
+        else:  # linear kernel of the raw features
+            alpha_scale_value = float(np.mean(np.sum(np.asarray(K, float) ** 2, axis=1)))
+        if not np.isfinite(alpha_scale_value) or alpha_scale_value <= 0:
+            alpha_scale_value = 1.0  # e.g. an all-zero feature: fall back to absolute alphas
+    elif alpha_scale not in ("absolute", "trace"):
+        raise ValueError("alpha_scale must be 'absolute' or 'trace'")
+    alphas = np.asarray(alphas, dtype=float) * alpha_scale_value
+    if method == "krr" and allow_null:
+        alphas = np.append(alphas, np.inf)
     if knn_ks is None:
             knn_ks = np.array([5, 10, 20, 50, 75, 100], dtype=int)
         # knn_ks = np.array([1, 3, 5, 10, 20, 50], dtype=int)
@@ -809,12 +846,15 @@ def fit_similarity_model(
             for p in grid:
                 key = tuple(sorted(p.items()))
                 if method == "krr":
-                    if precomputed:
-                        model = KernelRidge(alpha=p["alpha"], kernel="precomputed")
+                    if np.isinf(p["alpha"]):  # "no kernel"
+                        y_pred = np.zeros(len(val_idx))
                     else:
-                        model = KernelRidge(alpha=p["alpha"], kernel=kernel, gamma=p.get("gamma"))
-                    model.fit(K_train, y_train)
-                    y_pred = model.predict(K_val)
+                        if precomputed:
+                            model = KernelRidge(alpha=p["alpha"], kernel="precomputed")
+                        else:
+                            model = KernelRidge(alpha=p["alpha"], kernel=kernel, gamma=p.get("gamma"))
+                        model.fit(K_train, y_train)
+                        y_pred = model.predict(K_val)
 
                 elif method == "svr":
                     if precomputed:
@@ -866,7 +906,9 @@ def fit_similarity_model(
     best_params_final = repeat_best_params[best_rep]
 
     # Fit final model on full data
-    if method == "krr":
+    if method == "krr" and np.isinf(best_params_final["alpha"]):
+        final_model = NullKernelModel(K.shape[0])
+    elif method == "krr":
         if precomputed:
             final_model = KernelRidge(alpha=best_params_final["alpha"], kernel="precomputed")
         else:
@@ -908,6 +950,7 @@ def fit_similarity_model(
         "n_splits": n_splits,
         "n_repeats": n_repeats,
         "best_params": best_params_final,
+        "alpha_scale_value": alpha_scale_value,
         "repeat_best_params": repeat_best_params,
         "repeat_best_scores": np.array(repeat_best_scores, dtype=float),
         # "mean_repeat_best_score": float(np.mean(repeat_best_scores)),

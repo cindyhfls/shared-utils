@@ -19,6 +19,26 @@ def load_args_from_json(json_file):
             config['run'] = [int(x) for x in config['run']]
     return config
 
+def git_provenance(path):
+    """Commit of the git repo holding `path`, and whether `path` differs from it.
+
+    A dirty (modified or untracked) file is not described by the commit, so its
+    SHA-256 is recorded too. Outside a git repo, commit is None.
+    """
+    import subprocess, hashlib
+    path = os.path.abspath(path)
+    def git(*a):
+        return subprocess.run(["git", "-C", os.path.dirname(path), *a],
+                              capture_output=True, text=True).stdout.strip()
+    commit = git("rev-parse", "--short", "HEAD") or None
+    out = {"file": path, "commit": commit}
+    if commit:
+        out["dirty"] = bool(git("status", "--porcelain", "--", path))
+        if out["dirty"] and os.path.isfile(path):
+            with open(path, "rb") as f:
+                out["sha256"] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
 def save_args_to_json(args, output_dir=None):
     """Save all arguments to a JSON file"""
     if output_dir is None:
@@ -35,6 +55,8 @@ def save_args_to_json(args, output_dir=None):
 
     # Convert args to dictionary
     args_dict = vars(args).copy()
+    args_dict["provenance"] = {"script": git_provenance(sys.argv[0]),
+                               "shared_utils": git_provenance(__file__)}
 
     # Save to JSON
     with open(filepath, 'w') as f:

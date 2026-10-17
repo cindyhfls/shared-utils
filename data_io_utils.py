@@ -17,6 +17,24 @@ def parse_range(s):
             out.append(int(token))
     return out
 
+def roi_hemisphere(label):
+    """'left', 'right', or None for a subcortical atlas ROI name.
+
+    The two atlases tag the hemisphere differently: aseg uses an 'l-'/'r-' PREFIX
+    ('l-amygdala'), Tian a '-lh'/'-rh' SUFFIX ('AMY-lh'). Anything that carries neither
+    returns None, so callers can decide whether an untagged ROI is a problem.
+    """
+    if label.endswith('-lh'):
+        return 'left'
+    if label.endswith('-rh'):
+        return 'right'
+    if label.startswith('l-'):
+        return 'left'
+    if label.startswith('r-'):
+        return 'right'
+    return None
+
+
 def return_Tian_labels(atlas_name,is_7T=False):
     if '_' in atlas_name:
         atlas_name = atlas_name.split('_')[0]
@@ -390,3 +408,75 @@ def ensure_memmap(path, shape, dtype=np.float32, fill=np.nan):
 
 def row_done(mm_row):
     return np.all(np.isfinite(mm_row))
+
+
+def untransformed_target_label(targets_label):
+    """The connectivity-target label for a condition that applies NO transform (AA).
+
+    A target label is a chain: everything before the last '+' names transforms the target
+    passed through, and the last segment is the atlas itself.
+
+        'CHA+aseg'              common space, aligned   -> 'aseg'
+        'CHA+backproj+aseg'     subject space, aligned  -> 'aseg'
+        'CHA+aseg-mean'                                 -> 'aseg-mean'
+        'onavg-ico8'            never transformed       -> 'onavg-ico8'  (unchanged)
+
+    AA applies neither a CHA transform nor a back-projection, so its target carries no
+    markers at all. Stripping the whole prefix is deliberate: replacing only 'CHA+' would
+    leave 'backproj+aseg' in subject space, which is not a real folder.
+
+    This is the ONE place that rule is written down. It was previously restated in 37_, in
+    the common-space runners and in each notebook loader, and a fourth restatement was
+    written wrong -- so import this rather than re-deriving it.
+    """
+    return targets_label.split('+')[-1]
+
+
+# ---------------------------------------------------------------------------------------------
+# Alignment naming for figures and output files.
+#
+# The ALIGNMENT_CONFIG keys used by HBN/43_, 45_, 46_ and 48_ are historical and inconsistent
+# about naming the TASK: the movieDM entries are "AA" / "AA_scrubbed" while the rest ones are
+# "AA_rest12_scrubbed". A movie figure and a rest figure written from those keys sit side by side
+# with only one of them saying which data it came from -- and a rest run can silently overwrite a
+# movie file whose name never mentioned movieDM.
+#
+# Shared here rather than copied into each plotting script so the two cannot drift; the numbered
+# scripts import it as `from shared_utils.data_io_utils import alignment_group, alignment_label`.
+# ---------------------------------------------------------------------------------------------
+
+def alignment_role(alignment):
+    """"CHA_rest12_scrubbed" -> "CHA"; "AA_scrubbed" -> "AA"."""
+    if alignment.startswith("CHA"):
+        return "CHA"
+    if alignment.startswith("AA"):
+        return "AA"
+    return "?"
+
+
+def alignment_group(alignment):
+    """The TASK an alignment key refers to: "AA_scrubbed" -> "movieDM",
+    "CHA_rest12_scrubbed" -> "rest12". Bare "AA"/"CHA" are the unscrubbed movieDM caches."""
+    rest = alignment
+    for p in ("AA_", "CHA_"):
+        if rest.startswith(p):
+            rest = rest[len(p):]
+            break
+    else:
+        if rest in ("AA", "CHA"):
+            rest = ""
+    if rest in ("", "scrubbed"):
+        return "movieDM"
+    return rest.replace("_scrubbed", "")
+
+
+def alignment_label(alignment):
+    """Filename/display label with the task always spelled out:
+    "AA_scrubbed" -> "AA_movieDM_scrubbed", "AA_rest12_scrubbed" unchanged, "AA" -> "AA_movieDM".
+    """
+    role = alignment_role(alignment)
+    rest = alignment[len(role) + 1:] if alignment.startswith(role + "_") else ""
+    group = alignment_group(alignment)
+    if rest.startswith(group):
+        return alignment
+    return f"{role}_{group}_{rest}" if rest else f"{role}_{group}"

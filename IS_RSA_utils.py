@@ -314,7 +314,7 @@ def _compute_metrics_batch(Y_ranked, X_ranked, names):
 
 def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
                                      groups=None, n_jobs=-1, checkpoint_dir=None,
-                                     test_names=None):
+                                     test_names=None, group_test_names=None):
     """Rank-based variance partitioning with Freedman-Lane residual permutations.
 
     Observed statistics: full-model R², unique R² for each kernel/group, and
@@ -323,7 +323,8 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
 
     test_names restricts individual-kernel permutation tests, not covariates
     or observed statistics. None tests every kernel. Group tests are separate
-    and are not restricted by test_names. The number of draws is len(perm).
+    and are restricted only by group_test_names (None tests every group).
+    All groups retain observed unique R². The number of draws is len(perm).
     Subject permutations are supplied by the caller; this function converts
     them to condensed-pair indices and does not impose family restrictions.
 
@@ -331,10 +332,12 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
     intercept. Its outcome residuals are permuted to form Y_perm = Y_hat + R_p.
     Precomputed residualized target basis U gives
         unique_R2_perm = ||U.T @ R_p||² / SS_tot(Y_hat + R_p).
-    Individual kernels also get a partial-r null. Currently this correlates
-    the residualized target with R_p without projecting R_p out of the reduced
-    model again. This differs from refitting partial r on Y_perm; the known
-    denominator limitation has not yet been corrected.
+    Individual kernels also get a partial-r null: R_p is projected out of
+    the reduced model again before correlating with the residualized target.
+    This matches calculating partial r on the Freedman-Lane pseudo-outcome
+    Y_perm = Y_hat + R_p, not on shuffled raw Y. The nuisance-fitted component
+    Y_hat stays fixed while only the residuals are permuted; nuisance effects
+    are then removed again when calculating partial r.
 
     Returned permutation p-values are raw upper/lower tail fractions and
     twice the smaller tail (capped at 1). No +1 correction or FDR is applied
@@ -342,8 +345,7 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
     receive unique_r2 p-values only. No p-values are computed when perm is empty.
 
     Checkpoints reuse saved null arrays without validating inputs/permutations.
-    If a unique-R² checkpoint exists but its partial-r checkpoint is missing,
-    that kernel's partial-r p-values are omitted rather than regenerated.
+    Individual nulls are regenerated if either checkpoint is missing.
     Use a fresh checkpoint directory when the data, model, or permutations change.
     """
     names    = list(bx_similarity.keys())
@@ -385,7 +387,8 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
     # ── precompute quantities for FL null (no lstsq in permutation loop) ──
     def _fl_precompute(keep_idx, target_idx):
         """
-        Returns (residuals, U, Y_hat_c, SS_yhat, X_target_orth):
+        Returns (residuals, U, Y_hat_c, SS_yhat, X_target_orth, Q_reduced):
+          Q_reduced : rank-aware orthonormal basis of the reduced model
           U       : (nvalid, k_target) orthonormal basis for target predictors
                     after projecting out the reduced model — numerator = ||U.T @ R_p||^2
           Y_hat_c : Y_hat - mean(Y_hat), for SS_tot computation
@@ -415,19 +418,21 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
 
         Y_hat_c = Y_hat - Y_hat.mean(axis=0)
         SS_yhat = np.sum(Y_hat_c ** 2, axis=0)
-        return residuals, U, Y_hat_c, SS_yhat, X_target_orth
+        # SVD excludes redundant nuisance columns, matching lstsq's rank cutoff.
+        Q_reduced, singular_values, _ = np.linalg.svd(X_other_c, full_matrices=False)
+        tol = np.finfo(float).eps * max(X_other_c.shape) * singular_values[0]
+        Q_reduced = Q_reduced[:, singular_values > tol]
+        return residuals, U, Y_hat_c, SS_yhat, X_target_orth, Q_reduced
 
     def _fl_null(keep_idx, target_idx, obs):
         """Returns (null_unique_r2, null_partial_r). null_partial_r is None
         when target_idx has more than one column (groups) since partial
         correlation isn't defined for a multi-predictor target.
 
-        Currently partial_r_perm = corr(x_col, R_p), with a fixed residualized
-        target x_col. R_p is centered but not re-residualized against the
-        reduced model. Permuting residuals need not preserve orthogonality to
-        nuisance predictors, so this is not the same as refitting partial r
-        on Y_hat + R_p (known denominator limitation)."""
-        residuals, U, Y_hat_c, SS_yhat, X_target_orth = _fl_precompute(keep_idx, target_idx)
+        Partial-r uses corr(x_resid, M_reduced @ R_p). Permutation destroys
+        the original residuals' orthogonality to nuisance predictors, so the
+        outcome must be projected out of the reduced model again."""
+        residuals, U, Y_hat_c, SS_yhat, X_target_orth, Q_reduced = _fl_precompute(keep_idx, target_idx)
         compute_partial = X_target_orth.shape[1] == 1
         if compute_partial:
             x_col  = X_target_orth[:, 0]
@@ -442,8 +447,10 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
             unique_r2_perm = np.where(denom > 0, np.maximum(0.0, numer / denom), 0.0)
 
             if compute_partial:
-                num_partial   = x_col @ R_p_c
-                denom_partial = x_norm * np.sqrt(np.sum(R_p_c ** 2, axis=0))
+                resid_y_perm = R_p - Q_reduced @ (Q_reduced.T @ R_p)
+                resid_y_perm -= resid_y_perm.mean(axis=0)
+                num_partial   = x_col @ resid_y_perm
+                denom_partial = x_norm * np.sqrt(np.sum(resid_y_perm ** 2, axis=0))
                 partial_r_perm = np.where(denom_partial > 0, num_partial / denom_partial, 0.0)
             else:
                 partial_r_perm = None
@@ -464,7 +471,9 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
                        # its own (expensive) permutation null.
         ckpt_file = os.path.join(checkpoint_dir, f'null_{name}.npy') if checkpoint_dir else None
         ckpt_file_partial = os.path.join(checkpoint_dir, f'null_partial_{name}.npy') if checkpoint_dir else None
-        if ckpt_file and os.path.exists(ckpt_file):
+        # Reuse individual nulls only when both checkpoint files exist.
+        if (ckpt_file and os.path.exists(ckpt_file)
+                and os.path.exists(ckpt_file_partial)):
             print(f'  [ckpt] loading null for {name}')
             null = np.load(ckpt_file)
             null_partial = np.load(ckpt_file_partial) if ckpt_file_partial and os.path.exists(ckpt_file_partial) else None
@@ -489,6 +498,8 @@ def IS_RSA_variance_partitioning_FL(neural_similarity, bx_similarity, perm=[],
 
     # ── groups ────────────────────────────────────────────────────
     for grp_name, grp_members in (groups or {}).items():
+        if group_test_names is not None and grp_name not in group_test_names:
+            continue
         safe_name = grp_name.replace('/', '_')
         ckpt_file = os.path.join(checkpoint_dir, f'null_grp_{safe_name}.npy') if checkpoint_dir else None
         if ckpt_file and os.path.exists(ckpt_file):

@@ -279,17 +279,90 @@ def reliability_weighting_hyperalignment(X, Y, func, voxel_reliability_scores=No
     T = (wsqrt[:, None] * T_scaled) * inv_wsqrt[None, :]
     return T
 
-def evaluate_transformation(X_val, Y_val, xfm):
+def _slice_features(A, sl):
+    """Take a feature subset from either a 2D (nT, nV) or a 3D (nruns, nT, nV) array."""
+    A = np.asarray(A)
+    return A[:, :, sl] if A.ndim == 3 else A[:, sl]
+
+
+def searchlight_hyperalignment_per_sl_alpha(X, Y, sls, alphas, mat0=None, weights=None):
+    """searchlight_hyperalignment with a SEPARATE ridge alpha per searchlight.
+
+    hyperalignment.searchlight_hyperalignment takes one ``sl_func`` for every searchlight,
+    so a per-searchlight alpha has nowhere to enter. This writes the same blocks, in the
+    same order and with the same weights, but regularises each searchlight with its own
+    alpha. With one shared alpha it is identical to searchlight_hyperalignment.
+
+    Only meaningful when the searchlights are disjoint atlas parcels (the *_wholebrain
+    subcortical atlases). For overlapping cortical searchlights the blocks superpose, so
+    a voxel's prediction would mix several alphas.
     """
-    Evaluate the transformation on validation set
+    alphas = list(alphas)
+    if len(alphas) != len(sls):
+        raise ValueError(f"need one alpha per searchlight; got {len(alphas)} for {len(sls)} sls")
+    mat = np.zeros((X.shape[1], Y.shape[1])) if mat0 is None else mat0.copy()
+    if weights is None:
+        weights = [np.ones(len(sl)) for sl in sls]
+    for sl, w, alpha in zip(sls, weights, alphas):
+        t = ridge(X[:, sl], Y[:, sl], alpha=alpha)
+        mat[np.ix_(sl, sl)] += t * w[np.newaxis]
+    return mat
+
+
+def loo_cv_per_searchlight(X, Y, sls, alphas, voxel_reliability_scores=None):
+    """loo_cv run separately inside each searchlight, across a grid of ridge alphas.
+
+    Same leave-one-run-out split and the same fit direction as loo_cv (whichever of X, Y
+    is 3D supplies the runs), just not pooled over searchlights before the error is read
+    off. Calls loo_cv itself on each feature subset, so the direction handling and the
+    reliability weighting cannot drift from the pooled path.
+
+    Because the parcels are disjoint and cover every voxel, the pooled MSE is recoverable
+    exactly as the voxel-count-weighted mean over searchlights -- so the caller can pick a
+    single pooled alpha and per-searchlight alphas from this one result.
+
+    Returns
+    -------
+    mse_train, mse_val : ndarray of shape (n_searchlights, n_alphas)
+        Fold-averaged MSE within each searchlight.
+    """
+    alphas = list(alphas)
+    mse_train = np.zeros((len(sls), len(alphas)))
+    mse_val = np.zeros((len(sls), len(alphas)))
+    scores = None if voxel_reliability_scores is None else np.asarray(voxel_reliability_scores)
+    for p, sl in enumerate(sls):
+        X_sl, Y_sl = _slice_features(X, sl), _slice_features(Y, sl)
+        rel = None if scores is None else scores[sl]
+        for a, alpha in enumerate(alphas):
+            func = get_hyperalignment_func('ridge', alpha)
+            mse_train[p, a], mse_val[p, a] = loo_cv(
+                X_sl, Y_sl, func, voxel_reliability_scores=rel)
+    return mse_train, mse_val
+
+
+def evaluate_transformation(X_val, Y_val, xfm, compute_correlation=True):
+    """
+    Evaluate the transformation on validation set.
+
+    compute_correlation=False skips the per-column correlation, which is a Python loop over
+    every voxel and is pure overhead for callers that only read 'mse' -- loo_cv does exactly
+    that, and loo_cv is inside every ridgeCV alpha search (02_, 03_, 41_, 43_). The returned
+    'correlation' is then None. Kept True by default so direct callers
+    (hyperalignment_withweights.py) are unaffected.
     """
     # Predict on validation set
     Y_pred = X_val @ xfm  # (16,285) @ (285,285) = (16,285)
 
     # Calculate metrics
     mse = np.mean((Y_val - Y_pred) ** 2)
-    correlation = np.mean([np.corrcoef(Y_val[:, i], Y_pred[:, i])[0, 1]
-                          for i in range(Y_val.shape[1])])
+    if not compute_correlation:
+        return {'mse': mse, 'correlation': None}
+    # vectorised equivalent of the old per-column np.corrcoef loop
+    A = Y_val - Y_val.mean(axis=0, keepdims=True)
+    B = Y_pred - Y_pred.mean(axis=0, keepdims=True)
+    denom = np.sqrt((A ** 2).sum(axis=0) * (B ** 2).sum(axis=0))
+    denom[denom == 0] = np.nan
+    correlation = np.nanmean((A * B).sum(axis=0) / denom)
     return {
         'mse': mse,
         'correlation': correlation
@@ -327,12 +400,12 @@ def loo_cv(X, Y, func,voxel_reliability_scores=None):
 
         if runs_is_X:
             R = reliability_weighting_hyperalignment(runs_train, fixed, func, voxel_reliability_scores=voxel_reliability_scores,threshold=None)
-            mt = evaluate_transformation(runs_train, fixed, R)
-            mv = evaluate_transformation(runs_val, fixed, R)
+            mt = evaluate_transformation(runs_train, fixed, R, compute_correlation=False)
+            mv = evaluate_transformation(runs_val, fixed, R, compute_correlation=False)
         else:
             R = reliability_weighting_hyperalignment(fixed, runs_train, func, voxel_reliability_scores=voxel_reliability_scores,threshold=None)
-            mt = evaluate_transformation(fixed, runs_train, R)
-            mv = evaluate_transformation(fixed, runs_val, R)
+            mt = evaluate_transformation(fixed, runs_train, R, compute_correlation=False)
+            mv = evaluate_transformation(fixed, runs_val, R, compute_correlation=False)
 
         mse_train_all.append(mt['mse'])
         mse_val_all.append(mv['mse'])

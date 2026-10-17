@@ -410,3 +410,23 @@ def _add_title(img, title, font_size=20):
         font = ImageFont.load_default()
     draw.text((10, 4), title, fill=(0, 0, 0, 255), font=font)
     return img
+
+
+def plot_box_with_strip(df_curr, curr_ax, palette_curr, x="ISC", y="ROI",
+                        cond="condition", orient="h"):
+    """Box plot with the individual observations overlaid as a strip.
+
+    Lifted from 30_save_ISC_plots.py (which keeps its own copy because that module runs
+    plotting at import time and so cannot be imported) and from the notebook cells that
+    were cut into 45_plot_ridgeCV_alpha_distribution.py.
+    """
+    import seaborn as sns
+    sns.boxplot(
+        data=df_curr, x=x, y=y, hue=cond, palette=palette_curr, orient=orient,
+        fliersize=0,  # outlier markers; the strip already shows every point
+        ax=curr_ax,
+    )
+    sns.stripplot(
+        data=df_curr, x=x, y=y, hue=cond, dodge=True, palette='dark:.3',
+        size=1.5, alpha=0.8, orient=orient, ax=curr_ax, legend=False,
+    )

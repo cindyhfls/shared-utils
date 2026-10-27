@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GLASSER360_DIR = os.path.join(HERE, "support_files", "Parcellation-Glasser360")
 GLASSER360_INDICES_NPZ = os.path.join(GLASSER360_DIR, "glasser360_onavg-ico32_indices.npz")
 GLASSER360_REGION_CSV = os.path.join(GLASSER360_DIR, "HCP-MMP1_UniqueRegionList.csv")
-CA_NETWORK_CSV = os.path.join(GLASSER360_DIR, "glasser360_ColeAnticevic_networks.csv")
+CA_NETPARTITION_DIR = os.path.join(HERE, "support_files", "ColeAnticevicNetPartition-v1.1.6")
 SA_AXIS_CSV = os.path.join(HERE, "support_files", "SensorimotorAssociationAxis-Sydnor2021",
                            "Sensorimotor_Association_Axis_AverageRanks.csv")
 NB_DATA_ROOT = "/dartfs/rc/lab/H/HaxbyLab/jiaxin/nb-data"
@@ -99,8 +99,8 @@ dAscoli_2026_Tribev2_groups = {
 
 
 def _cole_anticevic_groups():
-    """{network: ["L_V1", ...]} from CA_NETWORK_CSV, networks in Cole-Anticevic id order (1-12)."""
-    ca = _load_ca_network_csv().sort_values("ca_network_id", kind="stable")
+    """{network: ["L_V1", ...]} from the ColeLab files, networks in Cole-Anticevic id order (1-12)."""
+    ca = _load_ca_networks().sort_values("ca_network_id", kind="stable")
     return {net: rows.label.tolist() for net, rows in ca.groupby("ca_network", sort=False)}
 
 
@@ -159,7 +159,7 @@ def load_glasser360_table():
 
     Columns: label ("L_V1"), hemi, region ("V1"), long_name, lobe, cortex_id (1-22) and cortex (the 22
     HCP-MMP1 groupings), x/y/z_cog, volmm, sa_rank and sa_avg_rank (S-A axis, see load_sa_axis_ranks),
-    ca_network (Cole-Anticevic network, see save_glasser360_ca_networks).
+    ca_network (Cole-Anticevic network, CAB-NP v1.1.6).
     """
     csv = pd.read_csv(GLASSER360_REGION_CSV, encoding="utf-8-sig")
     # The CSV names regions "V1_L" and writes 7PL as "7Pl"; check it is positionally in label order.
@@ -184,7 +184,7 @@ def load_glasser360_table():
         "volmm": csv.volmm.values,
         "sa_rank": np.tile(sa["final.rank"].values, 2),
         "sa_avg_rank": np.tile(sa["brains.average.rank"].values, 2),
-        "ca_network": _load_ca_network_csv().ca_network.values,
+        "ca_network": _load_ca_networks().ca_network.values,
     })
     table.index.name = "region_idx"
     return table
@@ -239,30 +239,37 @@ def load_sa_axis_ranks(column="final.rank"):
     return np.tile(_load_sa_axis_csv()[column].values, 2)
 
 
-def save_glasser360_ca_networks(out_path=CA_NETWORK_CSV):
-    """Write the Cole-Anticevic network of each Glasser-360 region from hcp_utils (nb env only).
-
-    hcp_utils' mmp and ca_network labels share the fsLR-32k grayordinates; the CA partition was built
-    on Glasser parcels, so every parcel must fall entirely in one network (checked).
-    """
-    import hcp_utils as hcp
-    rows = []
-    for i, label in enumerate(GLASSER360_LABELS):
-        if str(hcp.mmp.labels[i + 1]) != label:
-            raise ValueError(f"hcp_utils mmp label {i + 1} is {hcp.mmp.labels[i + 1]}, expected {label}")
-        nets = np.unique(hcp.ca_network.map_all[hcp.mmp.map_all == i + 1])
-        if len(nets) != 1:
-            raise ValueError(f"{label}: spans Cole-Anticevic networks {nets}")
-        rows.append((label, int(nets[0]), str(hcp.ca_network.labels[nets[0]])))
-    pd.DataFrame(rows, columns=["label", "ca_network_id", "ca_network"]).to_csv(out_path, index=False)
-    return out_path
+def load_ca_network_colors():
+    """{network: (r, g, b) in 0-1} -- the ColeLab network_labelfile.txt colours, in id order (1-12)."""
+    names, colors = _load_ca_network_labelfile()
+    return {names[k]: colors[k] for k in sorted(names)}
 
 
-def _load_ca_network_csv():
-    ca = pd.read_csv(CA_NETWORK_CSV)
-    if ca.label.tolist() != GLASSER360_LABELS:
-        raise ValueError(f"{CA_NETWORK_CSV}: rows not in Glasser-360 label order")
-    return ca
+def _load_ca_network_labelfile():
+    """({id: name}, {id: (r, g, b) in 0-1}) from network_labelfile.txt (name line, then 'id r g b a')."""
+    lines = open(os.path.join(CA_NETPARTITION_DIR, "network_labelfile.txt")).read().split()
+    names, colors = {}, {}
+    for k in range(0, len(lines), 6):
+        net_id, r, g, b = (int(x) for x in lines[k + 1:k + 5])
+        names[net_id] = lines[k]
+        colors[net_id] = (r / 255, g / 255, b / 255)
+    return names, colors
+
+
+def _load_ca_networks():
+    """One row per region (label, ca_network_id, ca_network), checked against the ColeLab LabelKey."""
+    ids = np.loadtxt(os.path.join(CA_NETPARTITION_DIR, "cortex_parcel_network_assignments.txt"), dtype=int)
+    key = pd.read_csv(os.path.join(CA_NETPARTITION_DIR,
+                                   "CortexSubcortex_ColeAnticevic_NetPartition_wSubcorGSR_parcels_LR_LabelKey.txt"),
+                      sep="\t").iloc[:N_GLASSER360]
+    key_labels = key.GLASSERLABELNAME.str.replace("_ROI", "", regex=False)
+    if [k.lower() for k in key_labels] != [l.lower() for l in GLASSER360_LABELS]:
+        raise ValueError(f"{CA_NETPARTITION_DIR}: LabelKey parcels not in Glasser-360 label order")
+    if not np.array_equal(ids, key.NETWORKKEY.values):
+        raise ValueError(f"{CA_NETPARTITION_DIR}: network assignments disagree with the LabelKey")
+    names, _ = _load_ca_network_labelfile()
+    return pd.DataFrame({"label": GLASSER360_LABELS, "ca_network_id": ids,
+                         "ca_network": [names[i] for i in ids]})
 
 
 def _load_sa_axis_csv():

@@ -52,8 +52,7 @@ GLASSER360_LABELS = ([f"L_{n}" for n in GLASSER360_BASE_LABELS]
                      + [f"R_{n}" for n in GLASSER360_BASE_LABELS])
 
 # Hirokawa et al. 2020 iScience, STAR Methods ("analysis of individual cortical areas"): 13 areas, each a
-# set of HCP360 parcels used on both hemispheres. Copied verbatim from the paper text; source text in
-# support_files/Parcellation-Glasser360/Hirokawa2020_iScience_groups.txt.
+# set of HCP360 parcels used on both hemispheres.
 HIROKAWA_2020_GROUPS = {
     "VC": ["V1", "V2", "V3", "V3A", "V3B", "V3CD", "V4", "V4t", "V6", "V6A", "V7", "V8", "FST", "IPS1",
            "FFC", "LO1", "LO2", "LO3", "PH", "PIT", "MT", "MST", "VMV1", "VMV2", "VMV3", "VVC"],
@@ -71,6 +70,31 @@ HIROKAWA_2020_GROUPS = {
     "OFC": ["OFC", "pOFC"],
 }
 
+Mentch_2026_elife_groups = {
+    "Early Visual": ["V1", "V2", "V3", "V4"],
+    "MT+": ["MT", "MST", "V4t", "FST"],
+    "Ventral Stream": ["FFC", "V8", "PIT", "VVC", "VMV1", "VMV2", "VMV3"],
+    "Dorsal Stream": ["V3A", "V3B", "V6", "V6A", "V7", "IPS1"],
+    "Frontal": ["IFSa", "IFSp", "FEF", "IFJa", "IFJp"],
+    "Lateral Stream": {
+        "aSTS": ["STGa", "STSda", "STSva"],
+        "pSTS": ["STSvp", "STSdp"]
+    },
+    "Early Auditory": ["A1", "LBelt", "MBelt", "PBelt"],
+    "Auditory Association": ["A5", "A4", "TA2"],
+    "Additional Multisensory": ["STV", "TPOJ1", "TPOJ2", "TPOJ3"]
+}
+
+dAscoli_2026_Tribev2_groups = {
+    "Visual (Early)": ["V1", "V2", "V3", "V4"],
+    "Visual (Ventral)": ["VMV1", "VMV2", "VMV3", "PHA1", "PHA2", "PHA3"],
+    "Visual (Dorsal)": ["V3A", "V6", "V6A", "V7", "V3B", "IPS1"],
+    "Visual (MT Complex)": ["LO1", "LO2", "LO3", "V3CD", "V4t"],
+    "Multisensory (TPJ)": ["TPOJ3", "TPOJ2", "TPOJ1", "STV", "PSL"],
+    "Auditory (Association)": ["A4", "A5", "STSdp", "STSvp", "STSda", "STSva", "TA2"],
+    "Auditory (Early)": ["A1", "PBelt", "MBelt", "LBelt", "RI"],
+    "Inferior Frontal": ["44", "45", "IFSa", "IFSp", "IFJa", "IFJp", "PEF"]
+}
 
 def load_glasser360_region_indices(source_space="onavg-ico32"):
     """360 vertex-index arrays into the masked L-then-R vertex space of `source_space`.
@@ -149,23 +173,45 @@ def load_glasser360_table():
 
 
 def load_Hirokawa_2020_iScience_groups():
-    """{area: region indices (0-359, left then right)} for the 13 Hirokawa et al. 2020 areas.
+    """{area: region indices (0-359)} for the 13 Hirokawa et al. 2020 areas; see _parcel_groups_to_regions."""
+    return _parcel_groups_to_regions(HIROKAWA_2020_GROUPS, "Hirokawa 2020")
 
-    Parcels not in any area are absent; vertices of an area are np.concatenate of
-    load_glasser360_region_indices()[i] over its region indices.
+
+def load_Mentch_2026_elife_groups():
+    """{group: region indices (0-359)} for Mentch_2026_elife_groups; see _parcel_groups_to_regions.
+
+    "Lateral Stream" is returned as its two subgroups, "aSTS" and "pSTS".
     """
+    return _parcel_groups_to_regions(Mentch_2026_elife_groups, "Mentch 2026")
+
+
+def load_dAscoli_2026_Tribev2_groups():
+    """{group: region indices (0-359)} for dAscoli_2026_Tribev2_groups; see _parcel_groups_to_regions."""
+    return _parcel_groups_to_regions(dAscoli_2026_Tribev2_groups, "d'Ascoli 2026")
+
+
+def _parcel_groups_to_regions(definition, source):
+    """{group: parcel names} -> {group: region indices (0-359, left then right)}, both hemispheres.
+
+    A nested {subgroup: names} dict is flattened to its subgroups. Raises if a name is not a Glasser-360
+    parcel or a parcel is in two groups. Parcels in no group are absent; vertices of a group are
+    np.concatenate of load_glasser360_region_indices()[i] over its region indices.
+    """
+    flat = {}
+    for group, names in definition.items():
+        flat.update(names if isinstance(names, dict) else {group: names})
     seen = {}
     groups = {}
-    for area, names in HIROKAWA_2020_GROUPS.items():
+    for group, names in flat.items():
         unknown = [n for n in names if n not in GLASSER360_BASE_LABELS]
         if unknown:
-            raise ValueError(f"Hirokawa 2020 {area}: not Glasser-360 parcel names: {unknown}")
+            raise ValueError(f"{source} {group}: not Glasser-360 parcel names: {unknown}")
         for n in names:
             if n in seen:
-                raise ValueError(f"Hirokawa 2020: {n} is in both {seen[n]} and {area}")
-            seen[n] = area
+                raise ValueError(f"{source}: {n} is in both {seen[n]} and {group}")
+            seen[n] = group
         base = [GLASSER360_BASE_LABELS.index(n) for n in names]
-        groups[area] = np.array(base + [b + N_GLASSER360_PER_HEMI for b in base])
+        groups[group] = np.array(base + [b + N_GLASSER360_PER_HEMI for b in base])
     return groups
 
 

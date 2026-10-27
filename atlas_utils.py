@@ -96,6 +96,13 @@ dAscoli_2026_Tribev2_groups = {
     "Inferior Frontal": ["44", "45", "IFSa", "IFSp", "IFJa", "IFJp", "PEF"]
 }
 
+# names accepted by load_glasser_groups
+GLASSER_GROUPS = {
+    "Hirokawa-2020": HIROKAWA_2020_GROUPS,
+    "Mentch-2026": Mentch_2026_elife_groups,
+    "dAscoli-2026": dAscoli_2026_Tribev2_groups,
+}
+
 def load_glasser360_region_indices(source_space="onavg-ico32"):
     """360 vertex-index arrays into the masked L-then-R vertex space of `source_space`.
 
@@ -172,47 +179,32 @@ def load_glasser360_table():
     return table
 
 
-def load_Hirokawa_2020_iScience_groups():
-    """{area: region indices (0-359)} for the 13 Hirokawa et al. 2020 areas; see _parcel_groups_to_regions."""
-    return _parcel_groups_to_regions(HIROKAWA_2020_GROUPS, "Hirokawa 2020")
+def load_glasser_groups(group="Hirokawa-2020"):
+    """{group name: region indices (0-359, left then right)}, both hemispheres, for a GLASSER_GROUPS set.
 
-
-def load_Mentch_2026_elife_groups():
-    """{group: region indices (0-359)} for Mentch_2026_elife_groups; see _parcel_groups_to_regions.
-
-    "Lateral Stream" is returned as its two subgroups, "aSTS" and "pSTS".
+    group: "Hirokawa-2020" (13 areas), "Mentch-2026" (Mentch_2026_elife_groups; "Lateral Stream" is
+    returned as its subgroups "aSTS" and "pSTS") or "dAscoli-2026" (dAscoli_2026_Tribev2_groups).
+    Raises if a name is not a Glasser-360 parcel or a parcel is in two groups. Parcels in no group are
+    absent; vertices of a group are np.concatenate of load_glasser360_region_indices()[i] over its indices.
     """
-    return _parcel_groups_to_regions(Mentch_2026_elife_groups, "Mentch 2026")
-
-
-def load_dAscoli_2026_Tribev2_groups():
-    """{group: region indices (0-359)} for dAscoli_2026_Tribev2_groups; see _parcel_groups_to_regions."""
-    return _parcel_groups_to_regions(dAscoli_2026_Tribev2_groups, "d'Ascoli 2026")
-
-
-def _parcel_groups_to_regions(definition, source):
-    """{group: parcel names} -> {group: region indices (0-359, left then right)}, both hemispheres.
-
-    A nested {subgroup: names} dict is flattened to its subgroups. Raises if a name is not a Glasser-360
-    parcel or a parcel is in two groups. Parcels in no group are absent; vertices of a group are
-    np.concatenate of load_glasser360_region_indices()[i] over its region indices.
-    """
+    if group not in GLASSER_GROUPS:
+        raise ValueError(f"group must be one of {list(GLASSER_GROUPS)}, got {group!r}")
     flat = {}
-    for group, names in definition.items():
-        flat.update(names if isinstance(names, dict) else {group: names})
+    for area, names in GLASSER_GROUPS[group].items():
+        flat.update(names if isinstance(names, dict) else {area: names})
     seen = {}
-    groups = {}
-    for group, names in flat.items():
+    regions = {}
+    for area, names in flat.items():
         unknown = [n for n in names if n not in GLASSER360_BASE_LABELS]
         if unknown:
-            raise ValueError(f"{source} {group}: not Glasser-360 parcel names: {unknown}")
+            raise ValueError(f"{group} {area}: not Glasser-360 parcel names: {unknown}")
         for n in names:
             if n in seen:
-                raise ValueError(f"{source}: {n} is in both {seen[n]} and {group}")
-            seen[n] = group
+                raise ValueError(f"{group}: {n} is in both {seen[n]} and {area}")
+            seen[n] = area
         base = [GLASSER360_BASE_LABELS.index(n) for n in names]
-        groups[group] = np.array(base + [b + N_GLASSER360_PER_HEMI for b in base])
-    return groups
+        regions[area] = np.array(base + [b + N_GLASSER360_PER_HEMI for b in base])
+    return regions
 
 
 def load_sa_axis_ranks(column="final.rank"):

@@ -8,6 +8,8 @@ space other than onavg-ico32.
     from shared_utils.atlas_utils import load_glasser360_region_indices, load_glasser360_table
     region_indices = load_glasser360_region_indices()   # 360 arrays into the 19341-vertex space
     table = load_glasser360_table()                     # label, cortex (22 groups), lobe, sa_rank, ...
+
+Sources and citations for every atlas, network and group set: README_atlas_utils.md.
 """
 import os
 import numpy as np

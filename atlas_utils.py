@@ -229,6 +229,15 @@ def load_glasser_groups(group="Hirokawa-2020"):
     return regions
 
 
+def load_glasser360_colors():
+    """(360, 3) RGB in 0-1, region order: the HCP-MMP1.0 parcel colours, as shipped in hcp_utils 0.1.0
+    (mmp_1.0.npz) and saved to glasser360_colors.csv."""
+    colors = pd.read_csv(os.path.join(GLASSER360_DIR, "glasser360_colors.csv"))
+    if colors.label.tolist() != GLASSER360_LABELS:
+        raise ValueError("glasser360_colors.csv: rows not in Glasser-360 label order")
+    return colors[["red", "green", "blue"]].values
+
+
 def load_sa_axis_ranks(column="final.rank"):
     """S-A axis rank per region (360, region order); both hemispheres get the same bilateral rank.
 

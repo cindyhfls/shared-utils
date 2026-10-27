@@ -54,9 +54,9 @@ GLASSER360_BASE_LABELS = [
 GLASSER360_LABELS = ([f"L_{n}" for n in GLASSER360_BASE_LABELS]
                      + [f"R_{n}" for n in GLASSER360_BASE_LABELS])
 
-# Hirokawa et al. 2020 iScience, STAR Methods ("analysis of individual cortical areas"): 13 areas, each a
+# Horikawa et al. 2020 iScience, STAR Methods ("analysis of individual cortical areas"): 13 areas, each a
 # set of HCP360 parcels used on both hemispheres.
-HIROKAWA_2020_GROUPS = {
+HORIKAWA_2020_GROUPS = {
     "VC": ["V1", "V2", "V3", "V3A", "V3B", "V3CD", "V4", "V4t", "V6", "V6A", "V7", "V8", "FST", "IPS1",
            "FFC", "LO1", "LO2", "LO3", "PH", "PIT", "MT", "MST", "VMV1", "VMV2", "VMV3", "VVC"],
     "TPJ": ["TPOJ1", "TPOJ2", "TPOJ3"],
@@ -108,7 +108,7 @@ def _cole_anticevic_groups():
 
 # names accepted by load_glasser_groups; a callable is called to get the definition
 GLASSER_GROUPS = {
-    "Hirokawa-2020": HIROKAWA_2020_GROUPS,
+    "Horikawa-2020": HORIKAWA_2020_GROUPS,
     "Mentch-2026": Mentch_2026_elife_groups,
     "dAscoli-2026": dAscoli_2026_Tribev2_groups,
     "ColeAnticevic": _cole_anticevic_groups,
@@ -192,10 +192,10 @@ def load_glasser360_table():
     return table
 
 
-def load_glasser_groups(group="Hirokawa-2020"):
+def load_glasser_groups(group="Horikawa-2020"):
     """{group name: sorted region indices (0-359, left then right)} for a GLASSER_GROUPS set.
 
-    group: "Hirokawa-2020" (13 areas), "Mentch-2026" (Mentch_2026_elife_groups; "Lateral Stream" is
+    group: "Horikawa-2020" (13 areas), "Mentch-2026" (Mentch_2026_elife_groups; "Lateral Stream" is
     returned as its subgroups "aSTS" and "pSTS"), "dAscoli-2026" (dAscoli_2026_Tribev2_groups) or
     "ColeAnticevic" (12 networks, hemisphere-specific: 13 L/R homologs are in different networks).
     In a definition, a parcel name ("V1") means both hemispheres and a label ("L_V1") one hemisphere.

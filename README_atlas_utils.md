@@ -44,10 +44,12 @@ Cite the original work for every resource you use from `atlas_utils.py`. Each da
 
 ## Region groups (`load_glasser_groups`)
 
-**`"Hirokawa-2020"`**
-- Hirokawa et al. (2020), *iScience*: STAR Methods, "analysis of individual cortical areas". The
-  definition text is in `support_files/Parcellation-Glasser360/Hirokawa2020_iScience_groups.txt`.
-- **TODO:** full reference (authors, title, DOI) not yet recorded.
+**`"Horikawa-2020"`**
+- Horikawa T, Cowen AS, Keltner D, Kamitani Y (2020). The neural representation of visually evoked
+  emotion is high-dimensional, categorical, and distributed across transmodal brain regions.
+  *iScience* 23, 101060. https://doi.org/10.1016/j.isci.2020.101060
+- Groups from its STAR Methods, "analysis of individual cortical areas". The definition text is in
+  `support_files/Parcellation-Glasser360/Horikawa2020_iScience_groups.txt`.
 
 **`"Mentch-2026"`**
 - Mentch J, Chen Y, Vanderwal T, Ghosh SS (2026). Preregistered movie-fMRI analyses reveal altered

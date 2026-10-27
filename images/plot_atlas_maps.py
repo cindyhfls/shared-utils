@@ -35,7 +35,8 @@ PARC_KWARGS = {"group": "Q1-Q6_RelatedParcellation210"}
 FIG_WIDTH = 6.0  # inches
 FONTSIZE = 11
 _TAB20 = [c for i, c in enumerate(plt.get_cmap("tab20").colors) if i not in (14, 15)]  # 14/15: greys
-PALETTE = _TAB20[0::2] + _TAB20[1::2]
+# + the darkest tab20b shade of each of its 5 hue blocks, so Glasser-22 gets 22 distinct colours
+PALETTE = _TAB20[0::2] + _TAB20[1::2] + list(plt.get_cmap("tab20b").colors[0::4])
 SA_CMAP = LinearSegmentedColormap.from_list("pennlinc_sa", ["#FFC125", "white", "#6f1282"])  # goldenrod1
 
 
@@ -54,7 +55,7 @@ def save_with_footer(img, footer_h, draw_footer, fn):
     ax.axis("off")
     if draw_footer is not None:
         draw_footer(fig, footer_h / fig_h)
-    fig.savefig(fn, dpi=200)
+    fig.savefig(fn, dpi=200, pil_kwargs={"optimize": True})  # keeps Glasser-22 under the 500 KB commit hook
     plt.close(fig)
     print(f"saved {fn}")
 
@@ -68,8 +69,9 @@ def plot_groups(name):
         values[idx] = i
     # vmin/vmax at -0.5 / n-0.5 put group i in the centre of colour bin i
     img = brain_image(values, ListedColormap([colors[g] for g in groups]), -0.5, len(groups) - 0.5)
-    ncol = 2
-    handles = [Patch(facecolor=colors[g], alpha=0.8, label=f"{g} ({len(idx)})") for g, idx in groups.items()]
+    labels = {g: f"{g.replace('_', ' ')} ({len(idx)})" for g, idx in groups.items()}
+    ncol = 2 if max(map(len, labels.values())) <= 30 else 1  # longer labels overflow half the width
+    handles = [Patch(facecolor=colors[g], alpha=0.8, label=labels[g]) for g in groups]
 
     def legend(fig, _):
         fig.legend(handles=handles, loc="lower center", ncol=ncol, fontsize=FONTSIZE, frameon=False)

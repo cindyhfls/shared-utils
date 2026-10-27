@@ -12,7 +12,7 @@ Cite the original work for every resource you use from `atlas_utils.py`. Each da
   cortex. *Nature* 536, 171–178. https://doi.org/10.1038/nature18933
 - Vertex indices are on the onavg-ico32 surface, from the `Q1-Q6_RelatedParcellation210` resampling in
   neuroboros' nb-data. Cite neuroboros / onavg as your project normally does.
-- `cortex` / `cortex_id` (the 22 groupings) and `lobe` come from `HCP-MMP1_UniqueRegionList.csv`. The
+- `cortex` / `cortex_id` (the 22 groupings, also `load_glasser_groups("Glasser-22")`) and `lobe` come from `HCP-MMP1_UniqueRegionList.csv`. The
   22 groupings are the ones in Glasser et al. 2016 (Supplementary Neuroanatomical Results).
   **TODO:** where the CSV itself came from is not recorded.
 - Parcel colours (`load_glasser360_colors`) are the HCP-MMP1.0 colours shipped in hcp_utils 0.1.0

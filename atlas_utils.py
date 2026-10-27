@@ -106,8 +106,15 @@ def _cole_anticevic_groups():
     return {net: rows.label.tolist() for net, rows in ca.groupby("ca_network", sort=False)}
 
 
+def _glasser22_groups():
+    """{cortex: ["L_V1", ...]}: the 22 HCP-MMP1 cortex groupings (Glasser 2016), in Cortex_ID order (1-22)."""
+    table = load_glasser360_table().sort_values("cortex_id", kind="stable")
+    return {cortex: rows.label.tolist() for cortex, rows in table.groupby("cortex", sort=False)}
+
+
 # names accepted by load_glasser_groups; a callable is called to get the definition
 GLASSER_GROUPS = {
+    "Glasser-22": _glasser22_groups,
     "Horikawa-2020": HORIKAWA_2020_GROUPS,
     "Mentch-2026": Mentch_2026_elife_groups,
     "dAscoli-2026": dAscoli_2026_Tribev2_groups,
@@ -195,7 +202,8 @@ def load_glasser360_table():
 def load_glasser_groups(group="Horikawa-2020"):
     """{group name: sorted region indices (0-359, left then right)} for a GLASSER_GROUPS set.
 
-    group: "Horikawa-2020" (13 areas), "Mentch-2026" (Mentch_2026_elife_groups; "Lateral Stream" is
+    group: "Glasser-22" (the 22 HCP-MMP1 cortices, i.e. the cortex column of load_glasser360_table),
+    "Horikawa-2020" (13 areas), "Mentch-2026" (Mentch_2026_elife_groups; "Lateral Stream" is
     returned as its subgroups "aSTS" and "pSTS"), "dAscoli-2026" (dAscoli_2026_Tribev2_groups) or
     "ColeAnticevic" (12 networks, hemisphere-specific: 13 L/R homologs are in different networks).
     In a definition, a parcel name ("V1") means both hemispheres and a label ("L_V1") one hemisphere.

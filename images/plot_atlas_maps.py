@@ -70,13 +70,29 @@ def plot_groups(name):
     # vmin/vmax at -0.5 / n-0.5 put group i in the centre of colour bin i
     img = brain_image(values, ListedColormap([colors[g] for g in groups]), -0.5, len(groups) - 0.5)
     labels = {g: f"{g.replace('_', ' ')} ({len(idx)})" for g, idx in groups.items()}
-    ncol = 2 if max(map(len, labels.values())) <= 30 else 1  # longer labels overflow half the width
     handles = [Patch(facecolor=colors[g], alpha=0.8, label=labels[g]) for g in groups]
+    fn = os.path.join(HERE, f"glasser_groups_{name}.png")
+    if max(map(len, labels.values())) > 30:  # too long for two columns below: one column on the right
+        save_with_legend_right(img, handles, fn)
+        return
+    ncol = 2
 
     def legend(fig, _):
         fig.legend(handles=handles, loc="lower center", ncol=ncol, fontsize=FONTSIZE, frameon=False)
-    save_with_footer(img, 0.25 * int(np.ceil(len(groups) / ncol)) + 0.15, legend,
-                     os.path.join(HERE, f"glasser_groups_{name}.png"))
+    save_with_footer(img, 0.25 * int(np.ceil(len(groups) / ncol)) + 0.15, legend, fn)
+
+
+def save_with_legend_right(img, handles, fn):
+    """Brain image FIG_WIDTH wide, one-column legend to its right (the saved figure grows to fit it)."""
+    fig = plt.figure(figsize=(FIG_WIDTH, FIG_WIDTH * img.height / img.width))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.imshow(img)
+    ax.axis("off")
+    ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=FONTSIZE, frameon=False)
+    # 180 dpi: the wider canvas at 200 dpi is over the 500 KB commit hook
+    fig.savefig(fn, dpi=180, bbox_inches="tight", pil_kwargs={"optimize": True})
+    plt.close(fig)
+    print(f"saved {fn}")
 
 
 def plot_glasser_colors():

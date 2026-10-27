@@ -51,6 +51,26 @@ GLASSER360_BASE_LABELS = [
 GLASSER360_LABELS = ([f"L_{n}" for n in GLASSER360_BASE_LABELS]
                      + [f"R_{n}" for n in GLASSER360_BASE_LABELS])
 
+# Hirokawa et al. 2020 iScience, STAR Methods ("analysis of individual cortical areas"): 13 areas, each a
+# set of HCP360 parcels used on both hemispheres. Copied verbatim from the paper text; source text in
+# support_files/Parcellation-Glasser360/Hirokawa2020_iScience_groups.txt.
+HIROKAWA_2020_GROUPS = {
+    "VC": ["V1", "V2", "V3", "V3A", "V3B", "V3CD", "V4", "V4t", "V6", "V6A", "V7", "V8", "FST", "IPS1",
+           "FFC", "LO1", "LO2", "LO3", "PH", "PIT", "MT", "MST", "VMV1", "VMV2", "VMV3", "VVC"],
+    "TPJ": ["TPOJ1", "TPOJ2", "TPOJ3"],
+    "IPL": ["PFm", "PGi", "PGs"],
+    "PC": ["7m", "v23ab", "d23ab", "31pv", "31pd", "31a", "PCV"],
+    "STS": ["STSda", "STSdp", "STSva", "STSvp"],
+    "TE": ["TE1a", "TE1m", "TE1p", "TE2a"],
+    "MTC": ["EC", "H"],
+    "insula": ["AAIC", "MI", "PoI1", "PoI2", "FOP2", "FOP3", "Ig", "OP2-3"],
+    "DLPFC": ["9-46d", "46", "a9-46v", "p9-46v"],
+    "DMPFC": ["d32", "9m", "10d"],
+    "VMPFC": ["10r", "10v", "p32", "s32"],
+    "ACC": ["a24", "a24pr", "p24", "a32pr", "p32pr"],
+    "OFC": ["OFC", "pOFC"],
+}
+
 
 def load_glasser360_region_indices(source_space="onavg-ico32"):
     """360 vertex-index arrays into the masked L-then-R vertex space of `source_space`.
@@ -126,6 +146,27 @@ def load_glasser360_table():
     })
     table.index.name = "region_idx"
     return table
+
+
+def load_Hirokawa_2020_iScience_groups():
+    """{area: region indices (0-359, left then right)} for the 13 Hirokawa et al. 2020 areas.
+
+    Parcels not in any area are absent; vertices of an area are np.concatenate of
+    load_glasser360_region_indices()[i] over its region indices.
+    """
+    seen = {}
+    groups = {}
+    for area, names in HIROKAWA_2020_GROUPS.items():
+        unknown = [n for n in names if n not in GLASSER360_BASE_LABELS]
+        if unknown:
+            raise ValueError(f"Hirokawa 2020 {area}: not Glasser-360 parcel names: {unknown}")
+        for n in names:
+            if n in seen:
+                raise ValueError(f"Hirokawa 2020: {n} is in both {seen[n]} and {area}")
+            seen[n] = area
+        base = [GLASSER360_BASE_LABELS.index(n) for n in names]
+        groups[area] = np.array(base + [b + N_GLASSER360_PER_HEMI for b in base])
+    return groups
 
 
 def load_sa_axis_ranks(column="final.rank"):

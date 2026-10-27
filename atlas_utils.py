@@ -17,6 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GLASSER360_DIR = os.path.join(HERE, "support_files", "Parcellation-Glasser360")
 GLASSER360_INDICES_NPZ = os.path.join(GLASSER360_DIR, "glasser360_onavg-ico32_indices.npz")
 GLASSER360_REGION_CSV = os.path.join(GLASSER360_DIR, "HCP-MMP1_UniqueRegionList.csv")
+CA_NETWORK_CSV = os.path.join(GLASSER360_DIR, "glasser360_ColeAnticevic_networks.csv")
 SA_AXIS_CSV = os.path.join(HERE, "support_files", "SensorimotorAssociationAxis-Sydnor2021",
                            "Sensorimotor_Association_Axis_AverageRanks.csv")
 NB_DATA_ROOT = "/dartfs/rc/lab/H/HaxbyLab/jiaxin/nb-data"
@@ -96,11 +97,19 @@ dAscoli_2026_Tribev2_groups = {
     "Inferior Frontal": ["44", "45", "IFSa", "IFSp", "IFJa", "IFJp", "PEF"]
 }
 
-# names accepted by load_glasser_groups
+
+def _cole_anticevic_groups():
+    """{network: ["L_V1", ...]} from CA_NETWORK_CSV, networks in Cole-Anticevic id order (1-12)."""
+    ca = _load_ca_network_csv().sort_values("ca_network_id", kind="stable")
+    return {net: rows.label.tolist() for net, rows in ca.groupby("ca_network", sort=False)}
+
+
+# names accepted by load_glasser_groups; a callable is called to get the definition
 GLASSER_GROUPS = {
     "Hirokawa-2020": HIROKAWA_2020_GROUPS,
     "Mentch-2026": Mentch_2026_elife_groups,
     "dAscoli-2026": dAscoli_2026_Tribev2_groups,
+    "ColeAnticevic": _cole_anticevic_groups,
 }
 
 def load_glasser360_region_indices(source_space="onavg-ico32"):
@@ -149,7 +158,8 @@ def load_glasser360_table():
     """One row per region in region-index order (0-359).
 
     Columns: label ("L_V1"), hemi, region ("V1"), long_name, lobe, cortex_id (1-22) and cortex (the 22
-    HCP-MMP1 groupings), x/y/z_cog, volmm, sa_rank and sa_avg_rank (S-A axis, see load_sa_axis_ranks).
+    HCP-MMP1 groupings), x/y/z_cog, volmm, sa_rank and sa_avg_rank (S-A axis, see load_sa_axis_ranks),
+    ca_network (Cole-Anticevic network, see save_glasser360_ca_networks).
     """
     csv = pd.read_csv(GLASSER360_REGION_CSV, encoding="utf-8-sig")
     # The CSV names regions "V1_L" and writes 7PL as "7Pl"; check it is positionally in label order.
@@ -174,36 +184,48 @@ def load_glasser360_table():
         "volmm": csv.volmm.values,
         "sa_rank": np.tile(sa["final.rank"].values, 2),
         "sa_avg_rank": np.tile(sa["brains.average.rank"].values, 2),
+        "ca_network": _load_ca_network_csv().ca_network.values,
     })
     table.index.name = "region_idx"
     return table
 
 
 def load_glasser_groups(group="Hirokawa-2020"):
-    """{group name: region indices (0-359, left then right)}, both hemispheres, for a GLASSER_GROUPS set.
+    """{group name: sorted region indices (0-359, left then right)} for a GLASSER_GROUPS set.
 
     group: "Hirokawa-2020" (13 areas), "Mentch-2026" (Mentch_2026_elife_groups; "Lateral Stream" is
-    returned as its subgroups "aSTS" and "pSTS") or "dAscoli-2026" (dAscoli_2026_Tribev2_groups).
-    Raises if a name is not a Glasser-360 parcel or a parcel is in two groups. Parcels in no group are
+    returned as its subgroups "aSTS" and "pSTS"), "dAscoli-2026" (dAscoli_2026_Tribev2_groups) or
+    "ColeAnticevic" (12 networks, hemisphere-specific: 13 L/R homologs are in different networks).
+    In a definition, a parcel name ("V1") means both hemispheres and a label ("L_V1") one hemisphere.
+    Raises if a name is not a Glasser-360 parcel or a region is in two groups. Regions in no group are
     absent; vertices of a group are np.concatenate of load_glasser360_region_indices()[i] over its indices.
     """
     if group not in GLASSER_GROUPS:
         raise ValueError(f"group must be one of {list(GLASSER_GROUPS)}, got {group!r}")
+    definition = GLASSER_GROUPS[group]
+    if callable(definition):
+        definition = definition()
     flat = {}
-    for area, names in GLASSER_GROUPS[group].items():
+    for area, names in definition.items():
         flat.update(names if isinstance(names, dict) else {area: names})
     seen = {}
     regions = {}
     for area, names in flat.items():
-        unknown = [n for n in names if n not in GLASSER360_BASE_LABELS]
+        unknown = [n for n in names if n not in GLASSER360_BASE_LABELS and n not in GLASSER360_LABELS]
         if unknown:
             raise ValueError(f"{group} {area}: not Glasser-360 parcel names: {unknown}")
+        idx = []
         for n in names:
-            if n in seen:
-                raise ValueError(f"{group}: {n} is in both {seen[n]} and {area}")
-            seen[n] = area
-        base = [GLASSER360_BASE_LABELS.index(n) for n in names]
-        regions[area] = np.array(base + [b + N_GLASSER360_PER_HEMI for b in base])
+            if n in GLASSER360_LABELS:
+                idx.append(GLASSER360_LABELS.index(n))
+            else:
+                base = GLASSER360_BASE_LABELS.index(n)
+                idx += [base, base + N_GLASSER360_PER_HEMI]
+        for i in idx:
+            if i in seen:
+                raise ValueError(f"{group}: {GLASSER360_LABELS[i]} is in both {seen[i]} and {area}")
+            seen[i] = area
+        regions[area] = np.sort(idx)
     return regions
 
 
@@ -215,6 +237,32 @@ def load_sa_axis_ranks(column="final.rank"):
     is the mean rank over the source maps before re-ranking.
     """
     return np.tile(_load_sa_axis_csv()[column].values, 2)
+
+
+def save_glasser360_ca_networks(out_path=CA_NETWORK_CSV):
+    """Write the Cole-Anticevic network of each Glasser-360 region from hcp_utils (nb env only).
+
+    hcp_utils' mmp and ca_network labels share the fsLR-32k grayordinates; the CA partition was built
+    on Glasser parcels, so every parcel must fall entirely in one network (checked).
+    """
+    import hcp_utils as hcp
+    rows = []
+    for i, label in enumerate(GLASSER360_LABELS):
+        if str(hcp.mmp.labels[i + 1]) != label:
+            raise ValueError(f"hcp_utils mmp label {i + 1} is {hcp.mmp.labels[i + 1]}, expected {label}")
+        nets = np.unique(hcp.ca_network.map_all[hcp.mmp.map_all == i + 1])
+        if len(nets) != 1:
+            raise ValueError(f"{label}: spans Cole-Anticevic networks {nets}")
+        rows.append((label, int(nets[0]), str(hcp.ca_network.labels[nets[0]])))
+    pd.DataFrame(rows, columns=["label", "ca_network_id", "ca_network"]).to_csv(out_path, index=False)
+    return out_path
+
+
+def _load_ca_network_csv():
+    ca = pd.read_csv(CA_NETWORK_CSV)
+    if ca.label.tolist() != GLASSER360_LABELS:
+        raise ValueError(f"{CA_NETWORK_CSV}: rows not in Glasser-360 label order")
+    return ca
 
 
 def _load_sa_axis_csv():

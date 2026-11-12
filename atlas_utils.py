@@ -5,8 +5,12 @@ right-hemisphere parcels 1-180. Only numpy/pandas are needed at import, so envs 
 (e.g. `ann` for the layer sweep) can use it; neuroboros is imported only to compute indices for a
 space other than onavg-ico32.
 
+Glasser region indices need an explicit HCP-MMP1.0 `group` (no default): "Q1-Q6_RelatedParcellation210"
+(210P), "Q1-Q6_RelatedValidation210" (210V; neuroboros' default) or "Q1-Q6_Related420". Each is the
+argmax of that group's averaged areal-classifier parcellations (Glasser et al., 2016); see README.
+
     from shared_utils.atlas_utils import load_glasser360_region_indices, load_glasser360_table
-    region_indices = load_glasser360_region_indices()   # 360 arrays into the 19341-vertex space
+    region_indices = load_glasser360_region_indices(group="Q1-Q6_RelatedParcellation210")  # 360 arrays, 19341-vertex space
     table = load_glasser360_table()                     # label, cortex (22 groups), lobe, sa_rank, ...
 
 Sources and citations for every atlas, network and group set: README_atlas_utils.md.
@@ -17,12 +21,38 @@ import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GLASSER360_DIR = os.path.join(HERE, "support_files", "Parcellation-Glasser360")
-GLASSER360_INDICES_NPZ = os.path.join(GLASSER360_DIR, "glasser360_onavg-ico32_indices.npz")
+GLASSER360_GROUPS = ("Q1-Q6_RelatedParcellation210", "Q1-Q6_RelatedValidation210", "Q1-Q6_Related420")
+# short names accepted wherever a `group` is taken (2026-11-12)
+GLASSER360_GROUP_ALIASES = {"210P": "Q1-Q6_RelatedParcellation210", "210V": "Q1-Q6_RelatedValidation210",
+                            "420": "Q1-Q6_Related420"}
+
+
+def resolve_glasser360_group(group):
+    """Full HCP-MMP1.0 group name for `group`, given either the full name or a short one (210P, 210V, 420)."""
+    full = GLASSER360_GROUP_ALIASES.get(group, group)
+    if full not in GLASSER360_GROUPS:
+        raise ValueError(f"group must be one of {GLASSER360_GROUPS} or {list(GLASSER360_GROUP_ALIASES)}; "
+                         f"got {group!r}")
+    return full
+
+
+def glasser360_group_alias(group):
+    """Short name (210P, 210V, 420) of a full or short group name, e.g. for file names."""
+    full = resolve_glasser360_group(group)
+    return next(k for k, v in GLASSER360_GROUP_ALIASES.items() if v == full)
+
+
+def glasser360_indices_npz(source_space, group):
+    group = resolve_glasser360_group(group)
+    return os.path.join(GLASSER360_DIR, f"glasser360_{group}_{source_space}_indices.npz")
+
+
+# the one precomputed npz (210P, onavg-ico32); other groups/spaces are computed with neuroboros
+GLASSER360_INDICES_NPZ = glasser360_indices_npz("onavg-ico32", "Q1-Q6_RelatedParcellation210")
 GLASSER360_REGION_CSV = os.path.join(GLASSER360_DIR, "HCP-MMP1_UniqueRegionList.csv")
 CA_NETPARTITION_DIR = os.path.join(HERE, "support_files", "ColeAnticevicNetPartition-v1.1.6")
 SA_AXIS_CSV = os.path.join(HERE, "support_files", "SensorimotorAssociationAxis-Sydnor2021",
                            "Sensorimotor_Association_Axis_AverageRanks.csv")
-NB_DATA_ROOT = "/dartfs/rc/lab/H/HaxbyLab/jiaxin/nb-data"
 
 N_GLASSER360_PER_HEMI = 180
 N_GLASSER360 = 2 * N_GLASSER360_PER_HEMI
@@ -113,6 +143,19 @@ def _glasser22_groups():
 
 
 # names accepted by load_glasser_groups; a callable is called to get the definition
+# Published colours of a GLASSER_GROUPS set, where the paper defines them ({group name: hex}).
+# dAscoli-2026: legend of Figure 8 (d'Ascoli et al. 2026, TRIBE v2), sampled 2026-11-12 from the embedded figure
+# image; the eight values are exactly matplotlib's ColorBrewer "Set1" in legend order (their brain maps shade each
+# parcel within its group colour; this is the group colour). Glasser-22 colours are in neuroboros
+# (nb.parcellation_colors("HCP_MMP", lr, networks="Glasser22")); Cole-Anticevic: load_ca_network_colors().
+GLASSER_GROUP_COLORS = {
+    "dAscoli-2026": {
+        "Visual (Early)": "#e41a1c", "Visual (Ventral)": "#377eb8", "Visual (Dorsal)": "#4daf4a",
+        "Visual (MT Complex)": "#984ea3", "Multisensory (TPJ)": "#ff7f00", "Auditory (Association)": "#ffff33",
+        "Auditory (Early)": "#a65628", "Inferior Frontal": "#f781bf",
+    },
+}
+
 GLASSER_GROUPS = {
     "Glasser-22": _glasser22_groups,
     "Horikawa-2020": HORIKAWA_2020_GROUPS,
@@ -121,32 +164,37 @@ GLASSER_GROUPS = {
     "ColeAnticevic": _cole_anticevic_groups,
 }
 
-def load_glasser360_region_indices(source_space="onavg-ico32"):
-    """360 vertex-index arrays into the masked L-then-R vertex space of `source_space`.
+def load_glasser360_region_indices(source_space="onavg-ico32", *, group):
+    """360 vertex-index arrays of the Glasser `group` parcels (required: one of GLASSER360_GROUPS, or 210P/210V/420)
+    into the masked L-then-R vertex space of `source_space`.
 
-    onavg-ico32 (19341 vertices, e.g. dms_lr_float32.npy) reads the precomputed npz; any other space
-    is computed with neuroboros (compute_glasser360_region_indices).
+    Reads the precomputed npz when there is one (onavg-ico32, 210P: 19341 vertices, e.g.
+    dms_lr_float32.npy) and checks the group stored in it; otherwise computes with neuroboros.
     """
-    if source_space != "onavg-ico32":
-        return compute_glasser360_region_indices(source_space)
-    with np.load(GLASSER360_INDICES_NPZ) as data:
+    group = resolve_glasser360_group(group)
+    fn = glasser360_indices_npz(source_space, group)
+    if not os.path.exists(fn):
+        return compute_glasser360_region_indices(source_space, group=group)
+    with np.load(fn) as data:
+        if str(data["group"]) != group:
+            raise ValueError(f"{fn} holds group {str(data['group'])!r}, expected {group!r}")
         return [data[f"region_{i:03d}"] for i in range(N_GLASSER360)]
 
 
-def compute_glasser360_region_indices(source_space="onavg-ico32", nb_data_root=NB_DATA_ROOT):
-    """Q1-Q6_RelatedParcellation210 parcels remapped into the official cortex mask (nb.mask).
+def compute_glasser360_region_indices(source_space="onavg-ico32", *, group):
+    """Glasser `group` parcels remapped into the official cortex mask (nb.mask); needs neuroboros.
 
-    The parcellation arrays are per-hemisphere-local and use HCP-MMP's own medial wall (label 0/-1);
+    nb.parcellation arrays are per-hemisphere-local and use HCP-MMP's own medial wall (label 0/-1);
     data live in nb.mask's L-then-R space, whose medial wall differs slightly. Right-hemisphere indices
     are offset by the left cortex size, and parcel vertices outside the mask are dropped.
     """
     import neuroboros as nb
+    group = resolve_glasser360_group(group)
     region_indices = []
     offset = 0
     for hemi in ("l", "r"):
         mask = nb.mask(hemi, space=source_space).astype(bool)
-        parc = np.load(os.path.join(nb_data_root, "core", source_space, "parcellations", "HCP_MMP",
-                                    f"{hemi}h", "Q1-Q6_RelatedParcellation210", "overlap-8div_parc.npy"))
+        parc = nb.parcellation("HCP_MMP", hemi, space=source_space, group=group)
         remap = np.full(mask.shape[0], -1, dtype=np.int64)
         remap[mask] = offset + np.arange(int(mask.sum()))
         for iparc in range(1, N_GLASSER360_PER_HEMI + 1):
@@ -156,12 +204,14 @@ def compute_glasser360_region_indices(source_space="onavg-ico32", nb_data_root=N
     return region_indices
 
 
-def save_glasser360_region_indices(out_path=GLASSER360_INDICES_NPZ):
-    """Regenerate the onavg-ico32 npz (needs the nb env); only if nb-data's parcellation or mask changes."""
-    region_indices = compute_glasser360_region_indices("onavg-ico32")
-    np.savez(out_path, **{f"region_{i:03d}": arr for i, arr in enumerate(region_indices)})
+def save_glasser360_region_indices(source_space="onavg-ico32", *, group):
+    """Write the npz load_glasser360_region_indices reads (needs the nb env), with `group` stored in it."""
+    group = resolve_glasser360_group(group)
+    out_path = glasser360_indices_npz(source_space, group)
+    region_indices = compute_glasser360_region_indices(source_space, group=group)
+    np.savez(out_path, group=np.array(group),
+             **{f"region_{i:03d}": arr for i, arr in enumerate(region_indices)})
     return out_path
-
 
 def load_glasser360_table():
     """One row per region in region-index order (0-359).
@@ -208,7 +258,7 @@ def load_glasser_groups(group="Horikawa-2020"):
     "ColeAnticevic" (12 networks, hemisphere-specific: 13 L/R homologs are in different networks).
     In a definition, a parcel name ("V1") means both hemispheres and a label ("L_V1") one hemisphere.
     Raises if a name is not a Glasser-360 parcel or a region is in two groups. Regions in no group are
-    absent; vertices of a group are np.concatenate of load_glasser360_region_indices()[i] over its indices.
+    absent; vertices of a group are np.concatenate of load_glasser360_region_indices(group=...)[i] over its indices.
     """
     if group not in GLASSER_GROUPS:
         raise ValueError(f"group must be one of {list(GLASSER_GROUPS)}, got {group!r}")

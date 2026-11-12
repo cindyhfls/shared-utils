@@ -12,6 +12,20 @@ Cite the original work for every resource you use from `atlas_utils.py`. Each da
   cortex. *Nature* 536, 171–178. https://doi.org/10.1038/nature18933
 - Vertex indices are on the onavg-ico32 surface, from the `Q1-Q6_RelatedParcellation210` resampling in
   neuroboros' nb-data. Cite neuroboros / onavg as your project normally does.
+- Which version: 210P is the 210 "parcellation" subjects. Glasser et al. (2016, Methods, cortical
+  areal classifier) trained a multi-layer perceptron on 112 multi-modal features (myelin, thickness,
+  task fMRI, 77 resting-state network maps, visuotopic maps, artefact maps) with the semi-automated
+  210P parcellation as labels; applied it to each subject; averaged the winner-take-all individual
+  parcellations within 210P and 210V ("Probabilistic maps"); argmax = group maximum probability map
+  (MPM). The BALSA `Q1-Q6_RelatedParcellation210.L/R.CorticalAreas_dil_Final_Final_Areas` dscalars
+  match this (values in 1/210 steps, per-vertex sum <= 1), so our parcels are the 210P MPM, not the
+  semi-automated group borders used as the classifier's training labels ("Orig" on BALSA). CAB-NP
+  (`ColeAnticevic`, GitHub v1.1.6) assigns networks per parcel; ColeLab's README (v1.1.3) says the
+  Q1-Q6_RelatedValidation210 version was used (a BALSA scene note about "Orig" 210P refers to an older version).
+  `Q1-Q6_Related420` (neuroboros' mean of 210P and 210V) and 210V give different boundaries.
+- Choosing the version: every function that takes `group` accepts the full name or the short names
+  `210P`, `210V`, `420` (`GLASSER360_GROUP_ALIASES`, `resolve_glasser360_group`). Only the 210P onavg-ico32
+  indices are precomputed; other groups/spaces are computed with neuroboros on the fly.
 - `cortex` / `cortex_id` (the 22 groupings, also `load_glasser_groups("Glasser-22")`) and `lobe` come from `HCP-MMP1_UniqueRegionList.csv`. The
   22 groupings are the ones in Glasser et al. 2016 (Supplementary Neuroanatomical Results).
   **TODO:** where the CSV itself came from is not recorded.
@@ -40,7 +54,7 @@ Cite the original work for every resource you use from `atlas_utils.py`. Each da
   https://doi.org/10.1016/j.neuron.2021.06.016
 - Files from https://github.com/PennLINC/S-A_ArchetypalAxis, commit `edaad95`. The repo has no licence
   file; its README asks that Sydnor et al. 2021 be cited.
-- Map colours in `images/sa_axis_rank.png` follow that repo's `brainmaps.Rmd`.
+- Map colours in `images/sa_axis_rank_<group>.png` follow that repo's `brainmaps.Rmd`.
 
 ## Region groups (`load_glasser_groups`)
 
